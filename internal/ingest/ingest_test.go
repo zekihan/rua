@@ -576,6 +576,155 @@ func TestFailureBlobNestedTrailingAndMultiple(t *testing.T) {
 	}
 }
 
+const mixedAggregateXML = `<feedback><report_metadata><org_name>Example</org_name>` +
+	`<report_id>mixed-agg-1</report_id><date_range><begin>1704067200</begin>` +
+	`<end>1704153599</end></date_range></report_metadata>` +
+	`<policy_published><domain>example.com</domain><p>reject</p><pct>100</pct></policy_published>` +
+	`<record><row><source_ip>192.0.2.1</source_ip><count>3</count>` +
+	`<policy_evaluated><disposition>none</disposition><dkim>pass</dkim><spf>fail</spf>` +
+	`</policy_evaluated></row><identifiers><header_from>example.com</header_from></identifiers>` +
+	`<auth_results><dkim><domain>example.com</domain><selector>mail</selector>` +
+	`<result>pass</result></dkim></auth_results></record></feedback>`
+
+const mixedTLSJSON = `{"organization-name":"Example","contact-info":"tls@example.net",` +
+	`"report-id":"mixed-tls-1","date-range":{"start-datetime":"2024-01-01T00:00:00Z",` +
+	`"end-datetime":"2024-01-01T23:59:59Z"},"policies":[{"policy":{"policy-type":"sts",` +
+	`"policy-domain":"example.com"},"summary":{"total-successful-session-count":5,` +
+	`"total-failure-session-count":1},"failure-details":[{"result-type":"certificate-expired",` +
+	`"sending-mta-ip":"192.0.2.10","failed-session-count":1}]}]}`
+
+func mixedFailurePart() string {
+	feedback := "Feedback-Type: auth-failure\r\nVersion: 1\r\nAuth-Failure: dmarc\r\n" +
+		"Arrival-Date: Mon, 1 Jan 2024 01:02:03 +0000\r\nSource-IP: 198.51.100.10\r\n" +
+		"Reported-Domain: example.com\r\n"
+	original := "From: sender@example.com\r\nTo: recipient@example.net\r\n" +
+		"Subject: original\r\n\r\nBODY-MARKER private original body"
+
+	return multipart("report; report-type=feedback-report", "fb-inner",
+		"Content-Type: text/plain\r\n\r\nBODY-MARKER human secret",
+		"Content-Type: message/feedback-report\r\n\r\n"+feedback,
+		"Content-Type: message/rfc822\r\n\r\n"+original)
+}
+
+type mixedSnapshot struct {
+	class     string
+	failures  []storedFailureRow
+	reportIDs []int64
+	records   int
+	tlsPols   int
+	reports   int
+}
+
+func snapshotMixed(t *testing.T, st *store.Store, messageID int64) mixedSnapshot {
+	t.Helper()
+
+	var snap mixedSnapshot
+
+	snap.class = scalar[string](t, st, "SELECT class FROM messages WHERE id=?", messageID)
+	snap.failures = storedFailureRows(t, st)
+	snap.reports = scalar[int](t, st, "SELECT count(*) FROM reports")
+	snap.records = scalar[int](t, st, "SELECT count(*) FROM records")
+	snap.tlsPols = scalar[int](t, st, "SELECT count(*) FROM tls_policies")
+
+	err := st.Read(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		err := tx.SelectContext(
+			ctx, &snap.reportIDs, "SELECT id FROM reports ORDER BY id",
+		)
+		if err != nil {
+			return fmt.Errorf("read report ids: %w", err)
+		}
+
+		return nil
+	})
+	mustSucceed(t, err)
+
+	return snap
+}
+
+func TestMixedFailureAndReportBothOrders(t *testing.T) {
+	cases := []struct {
+		name    string
+		docPart string
+		kind    report.Class
+		records int
+		tlsPols int
+	}{
+		{
+			"aggregate report first", attachment("application/xml", []byte(mixedAggregateXML)),
+			report.ClassAggregate, 1, 0,
+		},
+		{
+			"aggregate failure first", attachment("application/xml", []byte(mixedAggregateXML)),
+			report.ClassAggregate, 1, 0,
+		},
+		{
+			"tls report first", attachment(typeTLSJSON, []byte(mixedTLSJSON)),
+			report.ClassTLS, 0, 1,
+		},
+		{
+			"tls failure first", attachment(typeTLSJSON, []byte(mixedTLSJSON)),
+			report.ClassTLS, 0, 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pipe, st := fixtureStore(t, defaultOptions())
+			failureFirst := strings.Contains(tc.name, "failure first")
+
+			var raw []byte
+			if failureFirst {
+				raw = []byte("From: reporter@example.net\r\nSubject: mixed\r\n" +
+					"MIME-Version: 1.0\r\n" +
+					multipart("mixed", "outer", mixedFailurePart(), tc.docPart))
+			} else {
+				raw = []byte("From: reporter@example.net\r\nSubject: mixed\r\n" +
+					"MIME-Version: 1.0\r\n" +
+					multipart("mixed", "outer", tc.docPart, mixedFailurePart()))
+			}
+
+			result := mustIngest(t, pipe, raw)
+			if failureFirst {
+				assertEqual(t, result.Class, report.ClassFailure)
+			} else {
+				assertEqual(t, result.Class, tc.kind)
+			}
+
+			assertEqual(t, result.Status, StatusOK)
+
+			before := snapshotMixed(t, st, result.MessageID)
+			assertEqual(t, before.reports, 1)
+			assertEqual(t, before.records, tc.records)
+			assertEqual(t, before.tlsPols, tc.tlsPols)
+
+			if len(before.failures) != 1 || before.failures[0].OrigSubject != "original" {
+				t.Fatalf("failure rows = %+v", before.failures)
+			}
+
+			blob := storedMessageBlob(t, st, result.MessageID)
+			if bytes.Contains(blob, []byte("BODY-MARKER")) {
+				t.Fatalf("stored mixed blob leaks body marker: %q", blob)
+			}
+
+			_, err := pipe.Reparse(t.Context())
+			mustSucceed(t, err)
+
+			after := snapshotMixed(t, st, result.MessageID)
+			if after.class != before.class || after.reports != before.reports ||
+				after.records != before.records || after.tlsPols != before.tlsPols ||
+				!slices.Equal(after.reportIDs, before.reportIDs) ||
+				!slices.Equal(after.failures, before.failures) {
+				t.Fatalf("reparse changed mixed rows:\nbefore %+v\nafter %+v", before, after)
+			}
+
+			if reparsed := storedMessageBlob(t, st, result.MessageID); !bytes.Equal(
+				reparsed, blob,
+			) {
+				t.Fatalf("sanitized mixed blob not stable:\n%q\nwant:\n%q", reparsed, blob)
+			}
+		})
+	}
+}
+
 func finishWithin(t *testing.T, name string, fn func()) {
 	t.Helper()
 
@@ -914,6 +1063,39 @@ func TestReparseVersionChange(t *testing.T) {
 		0,
 	)
 	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM failure_reports"), 1)
+}
+
+func TestReparseIfNeededFromVersion2(t *testing.T) {
+	fakeParsers(t)
+	pipe, st := fixtureStore(t, defaultOptions())
+	mustIngest(t, pipe, []byte(sampleXML))
+	mustIngest(t, pipe, []byte(feedbackFixture()))
+
+	err := st.Write(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		err := store.SetMeta(ctx, tx, store.MetaParserVersion, "2")
+		if err != nil {
+			return fmt.Errorf("set parser version 2: %w", err)
+		}
+
+		return nil
+	})
+	mustSucceed(t, err)
+
+	ran, err := pipe.ReparseIfNeeded(t.Context())
+	mustSucceed(t, err)
+	assertEqual(t, ran, true)
+	assertEqual(
+		t,
+		scalar[string](t, st, "SELECT value FROM meta WHERE key=?", store.MetaParserVersion),
+		"3",
+	)
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM reports"), 1)
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM records"), 1)
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM failure_reports"), 1)
+
+	ran, err = pipe.ReparseIfNeeded(t.Context())
+	mustSucceed(t, err)
+	assertEqual(t, ran, false)
 }
 
 func TestImport(t *testing.T) {

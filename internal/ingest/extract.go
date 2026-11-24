@@ -49,6 +49,7 @@ type extraction struct {
 	accept     func(document) error
 	class      report.Class
 	remaining  int64
+	hasFailure bool
 }
 
 func newExtraction(accept func(document) error) *extraction {
@@ -57,6 +58,7 @@ func newExtraction(accept func(document) error) *extraction {
 		remaining:  MaxMessageBytes,
 		accept:     accept,
 		firstError: nil,
+		hasFailure: false,
 	}
 }
 
@@ -218,6 +220,7 @@ func (ext *extraction) failure(parts failureParts) error {
 	}
 
 	ext.classify(report.ClassFailure)
+	ext.hasFailure = true
 
 	if parts.headerError {
 		return nil

@@ -204,8 +204,8 @@ func rebuildMessage(
 
 	blob := digest
 
-	if state.result.Class == report.ClassFailure {
-		sanitized := sanitizeFailureMessage(raw, state.failureDocs)
+	if state.hasFailure {
+		sanitized := sanitizeMessage(raw, state.failureDocs, state.reportDocs, state.orderedDocs)
 		if !bytes.Equal(sanitized, raw) {
 			blob, err = store.PutBlob(ctx, tx, sanitized)
 			if err != nil {

@@ -40,6 +40,7 @@ var (
 	errMissingRow       = errors.New("missing aggregate record row")
 	errMissingEvaluated = errors.New("missing aggregate policy_evaluated")
 	errMissingCount     = errors.New("missing aggregate record count")
+	errDateRange        = errors.New("aggregate date range out of range")
 )
 
 type reason struct {
@@ -181,6 +182,11 @@ func (doc *document) aggregate() (*report.Aggregate, error) {
 	if strings.TrimSpace(doc.Org) == "" || strings.TrimSpace(doc.ID) == "" ||
 		strings.TrimSpace(doc.Domain) == "" || beginErr != nil || endErr != nil || begin > end {
 		return nil, errMetadata
+	}
+
+	if begin < report.MinReportUnix || begin >= report.MaxReportUnix ||
+		end < report.MinReportUnix || end >= report.MaxReportUnix {
+		return nil, errDateRange
 	}
 
 	policy, schema, err := doc.policy()
