@@ -1,38 +1,127 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client.ts";
-import type { PageProps } from "../page-props.ts";
-import { Loading, ErrorBox, Empty } from "../components/ui.tsx";
-import { SplitBar } from "../components/Charts.tsx";
-import { formatNumber, formatPercent } from "../format.ts";
 import type { SourceRow } from "../api/types.ts";
+import type { PageProps } from "../page-props.ts";
+import {
+  Empty,
+  ErrorBox,
+  Field,
+  Loading,
+  PageHeading,
+} from "../components/ui.tsx";
+import {
+  SourceTable,
+  type Sort,
+  type SortKey,
+} from "./sources/SourceTable.tsx";
 
-type SortKey = "name" | "messages" | "spfAligned" | "dkimAligned" | "firstSeen" | "lastSeen";
-export default function Sources(p: PageProps) {
-  const q = useQuery({ queryKey: ["sources", p.eff], queryFn: () => api.sources(p.eff) });
-  const [sort, setSort] = useState<SortKey>("messages");
-  const [dir, setDir] = useState(-1);
-  const [filter, setFilter] = useState("");
-  const rows = useMemo(() => {
-    let r = (q.data?.sources ?? []).slice();
-    if (filter) { const f = filter.toLowerCase(); r = r.filter((s) => [s.name, s.key, ...s.dkimDomains].join(" ").toLowerCase().includes(f)); }
-    r.sort((a, b) => { const av = a[sort as keyof SourceRow]; const bv = b[sort as keyof SourceRow]; const cmp = typeof av === "number" && typeof bv === "number" ? av - bv : String(av ?? "").localeCompare(String(bv ?? "")); return cmp * dir; });
-    return r;
-  }, [q.data, sort, dir, filter]);
-  if (q.isLoading) return <Loading />;
-  if (q.error) return <ErrorBox error={q.error} />;
-  const toggle = (k: SortKey) => { if (sort === k) setDir(dir * -1); else { setSort(k); setDir(-1); } };
-  const Th = ({ k, children }: { k: SortKey; children: string }) => <th><button type="button" onClick={() => toggle(k)} aria-label={`Sort by ${children}`} style={{ background: "none", border: 0, font: "inherit", cursor: "pointer", padding: 0 }}>{children}{sort === k ? (dir < 0 ? " ↓" : " ↑") : ""}</button></th>;
+function compare(a: SourceRow, b: SourceRow, sort: Sort) {
+  const first = a[sort.key];
+  const second = b[sort.key];
+  if (first === second) return a.key.localeCompare(b.key);
+  if (first === null) return 1;
+  if (second === null) return -1;
+  const order =
+    typeof first === "number" && typeof second === "number"
+      ? first - second
+      : String(first).localeCompare(String(second));
+  return sort.direction === "ascending" ? order : -order;
+}
+
+export default function Sources({ state, eff, makeHref, navigate }: PageProps) {
+  const { search, unknownOnly } = state.filters;
+  const filters = {
+    from: eff.from,
+    to: eff.to,
+    tz: eff.tz,
+    domain: eff.domain,
+    unknownOnly,
+  };
+  const query = useQuery({
+    queryKey: ["sources", filters],
+    queryFn: () => api.sources(filters),
+  });
+  const [sort, setSort] = useState<Sort>({
+    key: "messages",
+    direction: "descending",
+  });
+  const needle = search.trim().toLowerCase();
+  const rows = query.data?.sources
+    .filter((source) =>
+      [source.name, source.key, ...source.dkimDomains]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle),
+    )
+    .sort((a, b) => compare(a, b, sort));
+
+  function onSort(key: SortKey) {
+    setSort((current) => ({
+      key,
+      direction:
+        key === current.key && current.direction === "descending"
+          ? "ascending"
+          : "descending",
+    }));
+  }
+
   return (
-    <div style={{ display: "grid", gap: 12 }}>
-      <h1 data-testid="sources-heading">Sources</h1>
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-        <label>Filter <input className="input" data-testid="sources-filter" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="name or DKIM domain" /></label>
-        <label><input type="checkbox" data-testid="unknown-only-toggle" checked={p.state.filters.unknownOnly} onChange={(e) => p.navigate(p.makeHref("sources", { patch: { unknownOnly: e.target.checked } }))} /> Unknown only</label>
+    <div className="page">
+      <PageHeading testid="sources-heading">Sources</PageHeading>
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2.5 sm:flex sm:gap-3">
+        <Field label="Filter sources">
+          <input
+            className="input sm:w-64"
+            data-testid="sources-filter"
+            type="search"
+            value={search}
+            onChange={(e) =>
+              navigate(
+                makeHref("sources", { patch: { search: e.target.value } }),
+                true,
+              )
+            }
+            placeholder="Name or DKIM domain"
+          />
+        </Field>
+        <label className="flex min-h-10 items-center gap-2 rounded-md border border-line bg-surface px-2.5 text-xs font-medium sm:px-3 sm:text-sm">
+          <input
+            type="checkbox"
+            className="size-4 accent-accent"
+            data-testid="unknown-only-toggle"
+            checked={unknownOnly}
+            onChange={(e) =>
+              navigate(
+                makeHref("sources", {
+                  patch: { unknownOnly: e.target.checked },
+                }),
+              )
+            }
+          />
+          Unknown only
+        </label>
       </div>
-      {rows.length === 0 ? <Empty>No sources in this range.</Empty> :
-      <div className="card table-wrap"><table data-testid="sources-table"><thead><tr><Th k="name">Source</Th><Th k="messages">Messages</Th><th>Pass / forwarded / fail</th><Th k="spfAligned">SPF aligned</Th><Th k="dkimAligned">DKIM aligned</Th><th>DKIM domains</th><Th k="firstSeen">First seen</Th><Th k="lastSeen">Last seen</Th></tr></thead>
-        <tbody>{rows.map((s) => <tr key={s.key} className={s.expected ? "" : "unknown-row"}><td><a href={p.makeHref("source", { key: s.key })}>{s.name || s.key}</a> {!s.expected && <span className="badge">unknown</span>}<div className="small muted">{s.kind} · {s.ips} IP(s)</div></td><td className="num">{formatNumber(s.messages)}</td><td><SplitBar pass={s.pass} forwarded={s.forwarded} fail={s.fail} /><div className="small num">{formatNumber(s.pass)} / {formatNumber(s.forwarded)} / {formatNumber(s.fail)}</div></td><td className="num">{formatPercent(s.spfAligned)}</td><td className="num">{formatPercent(s.dkimAligned)}</td><td>{s.dkimDomains.join(", ") || "—"}</td><td>{s.firstSeen}</td><td>{s.lastSeen}</td></tr>)}</tbody></table></div>}
+      {!rows ? (
+        query.isError ? (
+          <ErrorBox error={query.error} />
+        ) : (
+          <Loading />
+        )
+      ) : rows.length === 0 ? (
+        <Empty>
+          {search
+            ? "No sources match this filter."
+            : "No sources in this range."}
+        </Empty>
+      ) : (
+        <SourceTable
+          rows={rows}
+          sort={sort}
+          onSort={onSort}
+          makeHref={makeHref}
+        />
+      )}
     </div>
   );
 }

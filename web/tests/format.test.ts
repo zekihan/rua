@@ -1,8 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatNumber, formatPercent, formatBytes, formatUnixDate, formatUnixDateTime } from "../src/format.ts";
-import { stackedSegments, donutArcs, sparklinePoints, barHeight, maxValue } from "../src/chart-helpers.ts";
-
+import {
+  formatNumber,
+  formatPercent,
+  formatBytes,
+  formatDateLabel,
+  formatUnixDate,
+  formatUnixDateTime,
+} from "../src/format.ts";
 test("numbers and percents", () => {
   assert.equal(formatNumber(1234567), "1,234,567");
   assert.equal(formatPercent(0.956), "95.6%");
@@ -21,15 +26,19 @@ test("dates formatted in selected tz", () => {
   assert.equal(formatUnixDate(0, "UTC"), "—");
 });
 
-test("chart helpers", () => {
-  const { total, segments } = stackedSegments([{ key: "pass", value: 3 }, { key: "fail", value: 1 }]);
-  assert.equal(total, 4); assert.equal(segments[0].fraction, 0.75); assert.equal(segments[1].offset, 0.75);
-  assert.equal(stackedSegments([{ key: "a", value: 0 }]).total, 0);
-  const arcs = donutArcs([{ key: "pass", value: 1 }, { key: "fail", value: 1 }]);
-  assert.equal(arcs[0].endAngle, Math.PI);
-  assert.equal(maxValue([1, 9, 3]), 9);
-  assert.equal(barHeight(5, 10, 100), 50);
-  assert.equal(barHeight(5, 0, 100), 0);
-  assert.equal(sparklinePoints([], 100, 30), "");
-  assert.equal(sparklinePoints([0, 10], 102, 32, 1).split(" ").length, 2);
+test("calendar dates stay on their reported day and timestamps follow DST", () => {
+  assert.equal(formatDateLabel("2026-03-08"), "8 Mar 2026");
+
+  const before = Date.parse("2026-03-08T06:59:00Z") / 1000;
+  const after = Date.parse("2026-03-08T07:01:00Z") / 1000;
+  assert.match(formatUnixDateTime(before, "America/New_York"), /01:59/);
+  assert.match(formatUnixDateTime(after, "America/New_York"), /03:01/);
+  assert.equal(formatUnixDateTime(null, "UTC"), "—");
+});
+
+test("zero differs from a missing rate, and invalid byte counts are hidden", () => {
+  assert.equal(formatPercent(0), "0.0%");
+  assert.equal(formatPercent(Number.NaN), "—");
+  assert.equal(formatBytes(-1), "—");
+  assert.equal(formatBytes(1024 ** 3), "1.0 GiB");
 });

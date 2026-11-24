@@ -1,0 +1,299 @@
+import { useEffect, useId, useRef, useState } from "react";
+import type { DayVerdicts, PolicyChange, TLSDay } from "../api/types.ts";
+import {
+  barHeight,
+  countScale,
+  maxValue,
+  tickIndices,
+} from "../chart-helpers.ts";
+import { formatNumber } from "../format.ts";
+import {
+  VerdictPatterns,
+  verdictFill,
+  verdictSeries,
+  type Verdict,
+} from "./Verdict.tsx";
+import { Empty } from "./ui.tsx";
+
+type Series = ReadonlyArray<{ key: Verdict; label: string }>;
+type ChartDay = { date: string; counts: Record<Verdict, number> };
+
+function useChartWidth() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(640);
+  useEffect(() => {
+    if (!ref.current) return;
+    const observer = new ResizeObserver(([entry]) => {
+      setWidth(Math.max(180, Math.floor(entry.contentRect.width)));
+    });
+    observer.observe(ref.current);
+    return () => observer.disconnect();
+  }, []);
+  return { ref, width };
+}
+
+export function policySummary(change: PolicyChange) {
+  const { before, after, fields } = change;
+  if (!before) return `First reported policy: ${after.p || "—"}`;
+  return (
+    fields
+      .map((field) => {
+        const key = field as keyof typeof after;
+        return `${field}: ${before[key] === "" ? "—" : (before[key] ?? "—")} → ${after[key] === "" ? "—" : (after[key] ?? "—")}`;
+      })
+      .join(", ") || "Published policy changed"
+  );
+}
+
+function DailyChart({
+  days,
+  series,
+  changes = [],
+  label,
+}: {
+  days: ChartDay[];
+  series: Series;
+  changes?: PolicyChange[];
+  label: string;
+}) {
+  const { ref, width } = useChartWidth();
+  const id = useId();
+  const [activeDate, setActiveDate] = useState<string>();
+  const changesByDate = new Map<string, PolicyChange[]>();
+  for (const change of changes) {
+    const existing = changesByDate.get(change.date);
+    if (existing) existing.push(change);
+    else changesByDate.set(change.date, [change]);
+  }
+  const active = activeDate ? (changesByDate.get(activeDate) ?? []) : [];
+  const max = maxValue(
+    days.map(({ counts }) =>
+      series.reduce((sum, { key }) => sum + counts[key], 0),
+    ),
+  );
+  const ticks = countScale(max);
+  const limit = ticks.at(-1)!;
+  const height = width < 500 ? 185 : 255;
+  const top = 17;
+  const bottom = height - 26;
+  const left = Math.max(30, formatNumber(limit).length * 7 + 8);
+  const right = width - 10;
+  const slot = (right - left) / Math.max(1, days.length);
+  const barWidth = Math.min(34, slot * 0.78);
+  const midX = (i: number) => left + (i + 0.5) * slot;
+
+  return (
+    <div className="space-y-3" data-testid="daily-chart">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-ink-2">
+        {series.map(({ key, label: seriesLabel }) => (
+          <span key={key} className="inline-flex items-center gap-1.5">
+            <svg
+              aria-hidden="true"
+              width="12"
+              height="12"
+              className="rounded-xs"
+            >
+              <rect width="12" height="12" fill={verdictFill(id, key)} />
+            </svg>
+            {seriesLabel}
+          </span>
+        ))}
+        {changes.length > 0 && (
+          <span className="inline-flex items-center gap-1.5">
+            <span aria-hidden="true" className="text-accent">
+              ◆
+            </span>{" "}
+            Policy change
+          </span>
+        )}
+      </div>
+      <div ref={ref} className="relative min-w-0">
+        {max === 0 && changes.length === 0 ? (
+          <Empty>No activity in this range.</Empty>
+        ) : (
+          <>
+            <svg
+              viewBox={`0 0 ${width} ${height}`}
+              className="block w-full overflow-visible"
+              role="group"
+              aria-label={label}
+            >
+              {ticks.map((tick) => {
+                const y = bottom - barHeight(tick, limit, bottom - top);
+                return (
+                  <g key={tick} aria-hidden="true">
+                    <line
+                      x1={left}
+                      x2={right}
+                      y1={y}
+                      y2={y}
+                      stroke="var(--line)"
+                    />
+                    <text
+                      x={left - 7}
+                      y={y}
+                      dominantBaseline="middle"
+                      textAnchor="end"
+                      className="fill-ink-2 text-[11px] tabular-nums"
+                    >
+                      {formatNumber(tick)}
+                    </text>
+                  </g>
+                );
+              })}
+              {days.map(({ date, counts }, index) => {
+                let y = bottom;
+                const x = midX(index) - barWidth / 2;
+                return (
+                  <g key={date}>
+                    <title>
+                      {date} ·{" "}
+                      {series
+                        .map(
+                          ({ key, label: name }) =>
+                            `${name} ${formatNumber(counts[key])}`,
+                        )
+                        .join(" · ")}
+                    </title>
+                    {series.map(({ key }) => {
+                      const size = barHeight(counts[key], limit, bottom - top);
+                      y -= size;
+                      return (
+                        size > 0 && (
+                          <rect
+                            key={key}
+                            x={x}
+                            y={y}
+                            width={barWidth}
+                            height={size}
+                            fill={verdictFill(id, key)}
+                          />
+                        )
+                      );
+                    })}
+                  </g>
+                );
+              })}
+              {tickIndices(days.length, width < 440 ? 3 : 6).map((index) => {
+                const x = Math.max(
+                  left + 13,
+                  Math.min(right - 13, midX(index)),
+                );
+                return (
+                  <text
+                    key={index}
+                    x={x}
+                    y={height - 7}
+                    textAnchor="middle"
+                    className="fill-ink-2 text-[11px] tabular-nums"
+                  >
+                    {days[index].date.slice(5)}
+                  </text>
+                );
+              })}
+              {Array.from(changesByDate, ([date, dated]) => {
+                const index = days.findIndex((day) => day.date === date);
+                if (index === -1) return null;
+                const x = midX(index);
+                return (
+                  <g
+                    key={date}
+                    tabIndex={0}
+                    role="img"
+                    aria-label={`Policy changes on ${date}: ${dated.map((change) => `${change.domain}, ${policySummary(change)}`).join("; ")}`}
+                    data-testid="policy-marker"
+                    className="cursor-help"
+                    onFocus={() => setActiveDate(date)}
+                    onBlur={() => setActiveDate(undefined)}
+                    onPointerEnter={() => setActiveDate(date)}
+                    onPointerLeave={(event) => {
+                      if (document.activeElement !== event.currentTarget)
+                        setActiveDate(undefined);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setActiveDate(undefined);
+                    }}
+                  >
+                    <line
+                      x1={x}
+                      y1={top}
+                      x2={x}
+                      y2={bottom}
+                      stroke="var(--accent)"
+                      strokeWidth="1.5"
+                      strokeDasharray="4 4"
+                      pointerEvents="none"
+                    />
+                    <rect
+                      x={x - 9}
+                      y="0"
+                      width="18"
+                      height="23"
+                      fill="transparent"
+                    />
+                    <path
+                      d={`M ${x} 4 l 5 5 -5 5 -5 -5 Z`}
+                      fill="var(--accent)"
+                      pointerEvents="none"
+                    />
+                  </g>
+                );
+              })}
+            </svg>
+            {active.length > 0 && (
+              <div
+                role="tooltip"
+                className="pointer-events-none absolute top-6 right-2 z-10 max-w-[90%] space-y-1 rounded-lg border border-line bg-surface px-3 py-2 text-xs shadow-lg"
+              >
+                <p className="font-semibold">{activeDate}</p>
+                {active.map((change) => (
+                  <p key={change.reportId}>
+                    <strong>{change.domain}</strong> · {policySummary(change)}
+                  </p>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      <svg className="absolute h-0 w-0" aria-hidden="true">
+        <VerdictPatterns id={id} />
+      </svg>
+    </div>
+  );
+}
+
+export function StackedBars({
+  days,
+  policyChanges,
+}: {
+  days: DayVerdicts[];
+  policyChanges?: PolicyChange[];
+}) {
+  return (
+    <DailyChart
+      days={days.map((day) => ({ date: day.date, counts: day }))}
+      series={verdictSeries}
+      changes={policyChanges}
+      label="Daily messages by DMARC verdict"
+    />
+  );
+}
+
+const tlsSeries = [
+  { key: "pass", label: "Successful" },
+  { key: "fail", label: "Failed" },
+] as const;
+
+export function TLSBars({ days }: { days: TLSDay[] }) {
+  return (
+    <DailyChart
+      days={days.map(({ date, success, failure }) => ({
+        date,
+        counts: { pass: success, forwarded: 0, fail: failure },
+      }))}
+      series={tlsSeries}
+      label="Daily TLS sessions by outcome"
+    />
+  );
+}
