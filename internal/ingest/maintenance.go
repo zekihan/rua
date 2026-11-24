@@ -89,8 +89,48 @@ func (pipe *Pipeline) Reparse(ctx context.Context) (int, error) {
 	return count, nil
 }
 
+func loadReportIdentities(
+	ctx context.Context, tx *sqlx.Tx,
+) (map[reportIdentity][]int64, error) {
+	var rows []struct {
+		Kind     string `db:"kind"`
+		Org      string `db:"org"`
+		ReportID string `db:"report_id"`
+		Domain   string `db:"domain"`
+		ID       int64  `db:"id"`
+		Message  int64  `db:"message"`
+	}
+
+	err := tx.SelectContext(ctx, &rows,
+		`SELECT id, message, kind, org, report_id, domain FROM reports ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot report identities: %w", err)
+	}
+
+	preserved := make(map[reportIdentity][]int64, len(rows))
+	for _, row := range rows {
+		key := reportIdentity{
+			message: row.Message, kind: row.Kind, org: row.Org,
+			reportID: row.ReportID, domain: row.Domain,
+		}
+		preserved[key] = append(preserved[key], row.ID)
+	}
+
+	return preserved, nil
+}
+
 func (pipe *Pipeline) rebuild(ctx context.Context, tx *sqlx.Tx) (int, bool, error) {
-	_, err := tx.ExecContext(ctx, `DELETE FROM reports; DELETE FROM failure_reports;`)
+	preserved, err := loadReportIdentities(ctx, tx)
+	if err != nil {
+		return 0, false, err
+	}
+
+	_, err = ensureReportIDSeq(ctx, tx)
+	if err != nil {
+		return 0, false, err
+	}
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM reports; DELETE FROM failure_reports;`)
 	if err != nil {
 		return 0, false, fmt.Errorf("clear parsed reports: %w", err)
 	}
@@ -119,7 +159,7 @@ func (pipe *Pipeline) rebuild(ctx context.Context, tx *sqlx.Tx) (int, bool, erro
 
 		lastID = row.ID
 
-		added, parseErr := rebuildMessage(ctx, tx, row.ID, row.Blob)
+		added, parseErr := rebuildMessage(ctx, tx, row.ID, row.Blob, preserved)
 		if parseErr != nil {
 			return 0, false, parseErr
 		}
@@ -145,6 +185,7 @@ func (pipe *Pipeline) rebuild(ctx context.Context, tx *sqlx.Tx) (int, bool, erro
 
 func rebuildMessage(
 	ctx context.Context, tx *sqlx.Tx, id int64, digest []byte,
+	preserved map[reportIdentity][]int64,
 ) (bool, error) {
 	raw, err := store.GetBlob(ctx, tx, digest)
 	if err != nil {
@@ -153,6 +194,7 @@ func rebuildMessage(
 
 	var state messageWrite
 
+	state.preserved = preserved
 	state.result.MessageID = id
 
 	err = state.parse(ctx, tx, raw)

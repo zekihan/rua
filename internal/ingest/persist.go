@@ -34,12 +34,101 @@ const (
 )
 
 type messageWrite struct {
+	preserved       map[reportIdentity][]int64
 	messageError    string
 	result          Result
 	aggregateRows   int
 	tlsRows         int
 	failuresWritten int
 	recordsAdded    bool
+}
+
+// reportIdentity identifies a report row across a reparse (DESIGN.md
+// section 5 report identity, scoped to its message).
+type reportIdentity struct {
+	kind     string
+	org      string
+	reportID string
+	domain   string
+	message  int64
+}
+
+const reportIDSeqKey = "report_id_seq"
+
+// ensureReportIDSeq initializes the monotonic report id sequence from the
+// largest id in use, so ids of deleted reports are never reused.
+func ensureReportIDSeq(ctx context.Context, tx *sqlx.Tx) (int64, error) {
+	var maxID sql.NullInt64
+
+	err := tx.GetContext(ctx, &maxID, `SELECT max(id) FROM reports`)
+	if err != nil {
+		return 0, fmt.Errorf("read largest report id: %w", err)
+	}
+
+	stored, ok, err := store.Meta(ctx, tx, reportIDSeqKey)
+	if err != nil {
+		return 0, fmt.Errorf("read report id sequence: %w", err)
+	}
+
+	var seq int64
+
+	if ok {
+		seq, err = strconv.ParseInt(stored, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse %s: %w", reportIDSeqKey, err)
+		}
+	}
+
+	changed := !ok
+
+	if maxID.Int64 > seq {
+		seq = maxID.Int64
+		changed = true
+	}
+
+	if changed {
+		err = store.SetMeta(ctx, tx, reportIDSeqKey, strconv.FormatInt(seq, 10))
+		if err != nil {
+			return 0, fmt.Errorf("write report id sequence: %w", err)
+		}
+	}
+
+	return seq, nil
+}
+
+func allocateReportID(ctx context.Context, tx *sqlx.Tx) (int64, error) {
+	seq, err := ensureReportIDSeq(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+
+	seq++
+
+	err = store.SetMeta(ctx, tx, reportIDSeqKey, strconv.FormatInt(seq, 10))
+	if err != nil {
+		return 0, fmt.Errorf("write report id sequence: %w", err)
+	}
+
+	return seq, nil
+}
+
+func (state *messageWrite) preservedID(row *reportRow) int64 {
+	key := reportIdentity{
+		message:  state.result.MessageID,
+		kind:     string(row.kind),
+		org:      row.org,
+		reportID: row.reportID,
+		domain:   row.domain,
+	}
+
+	queue := state.preserved[key]
+	if len(queue) == 0 {
+		return 0
+	}
+
+	state.preserved[key] = queue[1:]
+
+	return queue[0]
 }
 
 // Ingest stores an RFC 5322 message or a bare document. Parse failures are
@@ -344,13 +433,19 @@ func (state *messageWrite) insertReport(
 		}
 	}
 
-	var id int64
+	id := state.preservedID(row)
+	if id == 0 {
+		id, err = allocateReportID(ctx, tx)
+		if err != nil {
+			return 0, false, err
+		}
+	}
 
 	err = tx.GetContext(ctx, &id, `INSERT INTO reports
-		(kind, message, blob, org, email, extra_contact, report_id, begin, end, domain, schema,
+		(id, kind, message, blob, org, email, extra_contact, report_id, begin, end, domain, schema,
 		 duplicate_of, conflict)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-		row.kind, state.result.MessageID, row.blob, row.org, row.email, row.extraContact,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		id, row.kind, state.result.MessageID, row.blob, row.org, row.email, row.extraContact,
 		row.reportID, row.begin, row.end, row.domain, row.schema, duplicateOf, conflict)
 	if err != nil {
 		return 0, false, fmt.Errorf("insert report: %w", err)

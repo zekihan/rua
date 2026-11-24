@@ -361,12 +361,15 @@ func storedMessageBlob(t *testing.T, st *store.Store, id int64) []byte {
 
 		err := tx.GetContext(ctx, &digest, "SELECT blob FROM messages WHERE id=?", id)
 		if err != nil {
-			return err
+			return fmt.Errorf("read message blob digest: %w", err)
 		}
 
 		blob, err = store.GetBlob(ctx, tx, digest)
+		if err != nil {
+			return fmt.Errorf("read message blob: %w", err)
+		}
 
-		return err
+		return nil
 	})
 	mustSucceed(t, err)
 
@@ -416,22 +419,30 @@ func TestFailureBlobSanitized(t *testing.T) {
 			result.MessageID, rawDigest),
 		true,
 	)
-	// Dedup still recognises a refetch of the raw bytes.
+	// Dedup still recognizes a refetch of the raw bytes.
 	again := mustIngest(t, pipe, raw)
 	if !again.Known {
-		t.Fatalf("refetch of failure message not recognised: %+v", again)
+		t.Fatalf("refetch of failure message not recognized: %+v", again)
 	}
 
 	// Simulate pre-fix stored data: restore the raw blob, then reparse.
 	err := st.Write(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
 		digest, err := store.PutBlob(ctx, tx, raw)
 		if err != nil {
-			return err
+			return fmt.Errorf("restore raw blob: %w", err)
 		}
 
-		_, err = tx.ExecContext(ctx, "UPDATE messages SET blob=? WHERE id=?", digest, result.MessageID)
+		_, err = tx.ExecContext(
+			ctx,
+			"UPDATE messages SET blob=? WHERE id=?",
+			digest,
+			result.MessageID,
+		)
+		if err != nil {
+			return fmt.Errorf("point message at raw blob: %w", err)
+		}
 
-		return err
+		return nil
 	})
 	mustSucceed(t, err)
 
@@ -622,6 +633,64 @@ func TestDedupConflictAndReparse(t *testing.T) {
 	ran, err = pipe.ReparseIfNeeded(t.Context())
 	mustSucceed(t, err)
 	assertEqual(t, ran, false)
+}
+
+func TestReportIDsStableAcrossReparse(t *testing.T) {
+	fakeParsers(t)
+	pipe, st := fixtureStore(t, Options{
+		Now: func() time.Time { return testNow }, Metrics: nil, NewIPs: nil, RetentionDays: 0,
+	})
+
+	reportID := func(messageID int64) int64 {
+		t.Helper()
+
+		return scalar[int64](t, st, "SELECT id FROM reports WHERE message=?", messageID)
+	}
+
+	first := mustIngest(t, pipe, []byte(`<feedback id="a" end="400000" count="1"/>`))
+	expired := mustIngest(t, pipe, []byte(`<feedback id="b" end="1" count="1"/>`))
+	third := mustIngest(t, pipe, []byte(`<feedback id="c" end="400000" count="1"/>`))
+	duplicate := mustIngest(
+		t, pipe, []byte(`<feedback count="1" id="a" end="400000"></feedback>`),
+	)
+
+	firstID := reportID(first.MessageID)
+	expiredID := reportID(expired.MessageID)
+	thirdID := reportID(third.MessageID)
+	duplicateID := reportID(duplicate.MessageID)
+
+	assertEqual(
+		t,
+		scalar[int64](t, st, "SELECT duplicate_of FROM reports WHERE id=?", duplicateID),
+		firstID,
+	)
+
+	pruned, err := pipe.Prune(t.Context(), 1)
+	mustSucceed(t, err)
+	assertEqual(t, pruned, 1)
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM reports WHERE id=?", expiredID), 0)
+
+	fresh := mustIngest(t, pipe, []byte(`<feedback id="d" end="400000" count="1"/>`))
+	freshID := reportID(fresh.MessageID)
+
+	if freshID == expiredID || freshID <= duplicateID {
+		t.Fatalf("new report id %d reuses or precedes old ids (expired %d, duplicate %d)",
+			freshID, expiredID, duplicateID)
+	}
+
+	_, err = pipe.Reparse(t.Context())
+	mustSucceed(t, err)
+
+	assertEqual(t, reportID(first.MessageID), firstID)
+	assertEqual(t, reportID(third.MessageID), thirdID)
+	assertEqual(t, reportID(duplicate.MessageID), duplicateID)
+	assertEqual(t, reportID(fresh.MessageID), freshID)
+	assertEqual(
+		t,
+		scalar[int64](t, st, "SELECT duplicate_of FROM reports WHERE id=?", duplicateID),
+		firstID,
+	)
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM reports WHERE id=?", expiredID), 0)
 }
 
 func TestTLSDomainConflict(t *testing.T) {
