@@ -101,6 +101,15 @@ export function TableScroll({
   }, []);
   return (
     <div className={className}>
+      {more && (
+        <p
+          className="mb-1 text-right text-xs text-ink-3"
+          data-testid="table-scroll-cue"
+          aria-hidden="true"
+        >
+          More columns → scroll sideways
+        </p>
+      )}
       <div
         ref={ref}
         className={`table-wrap ${scrollClassName}`}
@@ -110,15 +119,6 @@ export function TableScroll({
       >
         {children}
       </div>
-      {more && (
-        <p
-          className="mt-1 text-right text-xs text-ink-3"
-          data-testid="table-scroll-cue"
-          aria-hidden="true"
-        >
-          More columns → scroll sideways
-        </p>
-      )}
     </div>
   );
 }
