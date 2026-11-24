@@ -188,7 +188,8 @@ func TestTLSDateRangeBounds(t *testing.T) {
 	}
 	for name, input := range accept {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Parse([]byte(input)); err != nil {
+			_, err := Parse([]byte(input))
+			if err != nil {
 				t.Fatalf("Parse error = %v, want nil", err)
 			}
 		})

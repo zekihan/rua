@@ -31,13 +31,13 @@ func sanitizeFailureMessage(raw []byte, failures []document) []byte {
 	return sanitizeMessage(raw, failures, nil, failures)
 }
 
-// sanitizeMessage is sanitizeFailureMessage plus every recognised
+// sanitizeMessage is sanitizeFailureMessage plus every recognized
 // aggregate/TLS document, for messages that mix failure content with other
 // reports. Each report document is stored as its own base64 attachment
 // holding the exact extracted bytes, so a reparse yields the same rows.
-// ordered preserves the extraction order so the message class is stable.
+// Ordered preserves the extraction order so the message class is stable.
 func sanitizeMessage(
-	raw []byte, failures []document, reports []document, ordered []document,
+	raw []byte, failures, reports, ordered []document,
 ) []byte {
 	if len(failures) == 0 && len(reports) == 0 {
 		return headerBlock(raw)
@@ -79,7 +79,7 @@ func buildFailureMessage(raw []byte, failures []document) []byte {
 }
 
 func buildMixedMessage(
-	raw []byte, failures []document, reports []document, ordered []document,
+	raw []byte, failures, reports, ordered []document,
 ) []byte {
 	outer := filteredOuterHeaders(raw)
 	mixedBoundary := chooseBoundary(mixedBoundaryBase, outer, failures, reports)
@@ -135,6 +135,7 @@ func writeReportPart(out *bytes.Buffer, boundary string, doc document) {
 	for len(encoded) > 76 {
 		out.WriteString(encoded[:76])
 		out.WriteString("\r\n")
+
 		encoded = encoded[76:]
 	}
 
@@ -142,12 +143,12 @@ func writeReportPart(out *bytes.Buffer, boundary string, doc document) {
 	out.WriteString("\r\n")
 }
 
-func sanitizedBoundary(outer []byte, failures []document, reports []document) string {
+func sanitizedBoundary(outer []byte, failures, reports []document) string {
 	return chooseBoundary(sanitizedBoundaryBase, outer, failures, reports)
 }
 
 func chooseBoundary(
-	base string, outer []byte, failures []document, reports []document,
+	base string, outer []byte, failures, reports []document,
 ) string {
 	boundary := base
 	for boundaryInUse(boundary, outer, failures, reports) {
@@ -158,7 +159,7 @@ func chooseBoundary(
 }
 
 func boundaryInUse(
-	boundary string, outer []byte, failures []document, reports []document,
+	boundary string, outer []byte, failures, reports []document,
 ) bool {
 	needle := []byte(boundary)
 	if bytes.Contains(outer, needle) {

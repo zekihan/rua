@@ -39,12 +39,12 @@ type messageWrite struct {
 	reportDocs      []document
 	orderedDocs     []document
 	messageError    string
-	hasFailure      bool
 	result          Result
 	aggregateRows   int
 	tlsRows         int
 	failuresWritten int
 	recordsAdded    bool
+	hasFailure      bool
 }
 
 // reportIdentity identifies a report row across a reparse (DESIGN.md
@@ -160,7 +160,12 @@ func (pipe *Pipeline) Ingest(ctx context.Context, raw []byte, src Source) (Resul
 		if len(raw) <= MaxMessageBytes {
 			stored := raw
 			if state.hasFailure {
-				stored = sanitizeMessage(raw, state.failureDocs, state.reportDocs, state.orderedDocs)
+				stored = sanitizeMessage(
+					raw,
+					state.failureDocs,
+					state.reportDocs,
+					state.orderedDocs,
+				)
 			}
 
 			blob, err = store.PutBlob(ctx, tx, stored)
@@ -322,6 +327,7 @@ func parseMessage(
 		case report.ClassAggregate, report.ClassTLS:
 			state.reportDocs = append(state.reportDocs, doc)
 			state.orderedDocs = append(state.orderedDocs, doc)
+		case report.ClassOther:
 		default:
 		}
 

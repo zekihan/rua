@@ -342,7 +342,8 @@ func TestAggregateDateRangeBounds(t *testing.T) {
 	}
 	for name, input := range accept {
 		t.Run(name, func(t *testing.T) {
-			if _, err := ParseAggregate([]byte(input)); err != nil {
+			_, err := ParseAggregate([]byte(input))
+			if err != nil {
 				t.Fatalf("ParseAggregate error = %v, want nil", err)
 			}
 		})

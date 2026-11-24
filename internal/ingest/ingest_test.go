@@ -649,14 +649,22 @@ func TestMixedFailureAndReportBothOrders(t *testing.T) {
 		records int
 		tlsPols int
 	}{
-		{"aggregate report first", attachment("application/xml", []byte(mixedAggregateXML)),
-			report.ClassAggregate, 1, 0},
-		{"aggregate failure first", attachment("application/xml", []byte(mixedAggregateXML)),
-			report.ClassAggregate, 1, 0},
-		{"tls report first", attachment(typeTLSJSON, []byte(mixedTLSJSON)),
-			report.ClassTLS, 0, 1},
-		{"tls failure first", attachment(typeTLSJSON, []byte(mixedTLSJSON)),
-			report.ClassTLS, 0, 1},
+		{
+			"aggregate report first", attachment("application/xml", []byte(mixedAggregateXML)),
+			report.ClassAggregate, 1, 0,
+		},
+		{
+			"aggregate failure first", attachment("application/xml", []byte(mixedAggregateXML)),
+			report.ClassAggregate, 1, 0,
+		},
+		{
+			"tls report first", attachment(typeTLSJSON, []byte(mixedTLSJSON)),
+			report.ClassTLS, 0, 1,
+		},
+		{
+			"tls failure first", attachment(typeTLSJSON, []byte(mixedTLSJSON)),
+			report.ClassTLS, 0, 1,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

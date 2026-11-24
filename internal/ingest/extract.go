@@ -58,6 +58,7 @@ func newExtraction(accept func(document) error) *extraction {
 		remaining:  MaxMessageBytes,
 		accept:     accept,
 		firstError: nil,
+		hasFailure: false,
 	}
 }
 
