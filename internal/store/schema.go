@@ -198,4 +198,21 @@ CREATE INDEX failure_reports_message ON failure_reports (message);
 	`
 ALTER TABLE mailboxes ADD COLUMN pending INTEGER;
 `,
+	`
+-- Stored extraction output for failure-containing messages (DESIGN.md
+-- section 6). Their messages.blob stays NULL; rows are in extraction
+-- order. kind is outer-headers, aggregate, tls, feedback,
+-- original-headers or extract-error. A feedback row and the
+-- original-headers row belonging to it have consecutive seq values
+-- (feedback first). blob is NULL for extract-error rows and for parts
+-- that could not be read, whose error text is stored instead.
+CREATE TABLE documents (
+	message INTEGER NOT NULL REFERENCES messages (id) ON DELETE CASCADE,
+	seq     INTEGER NOT NULL,
+	kind    TEXT NOT NULL,
+	blob    BLOB REFERENCES blobs (sha256),
+	error   TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (message, seq)
+) STRICT;
+`,
 }

@@ -363,12 +363,14 @@ type messageDBRow struct {
 	Date    int64  `db:"internaldate"`
 	Size    int64  `db:"size"`
 	UID     int64  `db:"uid"`
+	HasDocs bool   `db:"has_docs"`
 }
 
 func (svc *Service) loadMessages(
 	ctx context.Context, tx *sqlx.Tx, where string, args []any,
 ) ([]MessageRow, error) {
-	query := `SELECT id, mailbox, uid, internaldate, size, from_addr, subject, class, status, error, blob
+	query := `SELECT id, mailbox, uid, internaldate, size, from_addr, subject, class, status, error, blob,
+		EXISTS (SELECT 1 FROM documents WHERE message = messages.id) AS has_docs
 		FROM messages WHERE ` + where + ` ORDER BY internaldate DESC, id DESC LIMIT 200`
 
 	var rows []messageDBRow
@@ -393,7 +395,7 @@ func (svc *Service) loadMessages(
 			InternalDate: row.Date,
 			Size:         row.Size,
 			UID:          uint32(row.UID), //nolint:gosec // Stored UID is non-negative.
-			HasRaw:       len(row.Blob) > 0,
+			HasRaw:       len(row.Blob) > 0 || row.HasDocs,
 		})
 	}
 
