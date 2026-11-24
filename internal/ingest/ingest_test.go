@@ -1057,6 +1057,39 @@ func TestReparseVersionChange(t *testing.T) {
 	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM failure_reports"), 1)
 }
 
+func TestReparseIfNeededFromVersion2(t *testing.T) {
+	fakeParsers(t)
+	pipe, st := fixtureStore(t, defaultOptions())
+	mustIngest(t, pipe, []byte(sampleXML))
+	mustIngest(t, pipe, []byte(feedbackFixture()))
+
+	err := st.Write(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		err := store.SetMeta(ctx, tx, store.MetaParserVersion, "2")
+		if err != nil {
+			return fmt.Errorf("set parser version 2: %w", err)
+		}
+
+		return nil
+	})
+	mustSucceed(t, err)
+
+	ran, err := pipe.ReparseIfNeeded(t.Context())
+	mustSucceed(t, err)
+	assertEqual(t, ran, true)
+	assertEqual(
+		t,
+		scalar[string](t, st, "SELECT value FROM meta WHERE key=?", store.MetaParserVersion),
+		"3",
+	)
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM reports"), 1)
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM records"), 1)
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM failure_reports"), 1)
+
+	ran, err = pipe.ReparseIfNeeded(t.Context())
+	mustSucceed(t, err)
+	assertEqual(t, ran, false)
+}
+
 func TestImport(t *testing.T) {
 	fakeParsers(t)
 	pipe, st := fixtureStore(t, defaultOptions())
