@@ -825,6 +825,8 @@ func (svc *Service) ReportRaw(ctx context.Context, id int64) ([]byte, string, er
 }
 
 // MessageRaw returns the original message bytes and a file name.
+// A failure-containing message has no stored raw blob; its download
+// is rendered on the fly from its stored documents instead.
 func (svc *Service) MessageRaw(ctx context.Context, id int64) ([]byte, string, error) {
 	var data []byte
 
@@ -840,20 +842,31 @@ func (svc *Service) MessageRaw(ctx context.Context, id int64) ([]byte, string, e
 			return fmt.Errorf("load message: %w", err)
 		}
 
-		if len(blob) == 0 {
+		if len(blob) > 0 {
+			raw, blobErr := store.GetBlob(ctx, tx, blob)
+			if errors.Is(blobErr, store.ErrNotFound) {
+				return fmt.Errorf("%w: message blob", ErrNotFound)
+			}
+
+			if blobErr != nil {
+				return fmt.Errorf("read message blob: %w", blobErr)
+			}
+
+			data = raw
+
+			return nil
+		}
+
+		docs, docErr := loadRenderDocs(ctx, tx, id)
+		if docErr != nil {
+			return docErr
+		}
+
+		if len(docs) == 0 {
 			return fmt.Errorf("%w: message blob", ErrNotFound)
 		}
 
-		raw, err := store.GetBlob(ctx, tx, blob)
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%w: message blob", ErrNotFound)
-		}
-
-		if err != nil {
-			return fmt.Errorf("read message blob: %w", err)
-		}
-
-		data = raw
+		data = renderDocuments(docs)
 
 		return nil
 	})
@@ -862,4 +875,39 @@ func (svc *Service) MessageRaw(ctx context.Context, id int64) ([]byte, string, e
 	}
 
 	return data, "message-" + strconv.FormatInt(id, 10) + ".eml", nil
+}
+
+func loadRenderDocs(
+	ctx context.Context, tx *sqlx.Tx, messageID int64,
+) ([]renderDoc, error) {
+	var rows []struct {
+		Kind string `db:"kind"`
+		Blob []byte `db:"blob"`
+	}
+
+	err := tx.SelectContext(ctx, &rows, `SELECT kind, blob FROM documents
+		WHERE message = ? ORDER BY seq`, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("load message documents: %w", err)
+	}
+
+	docs := make([]renderDoc, 0, len(rows))
+
+	for index := range rows {
+		doc := renderDoc{kind: rows[index].Kind, data: nil}
+		if len(rows[index].Blob) > 0 {
+			doc.data, err = store.GetBlob(ctx, tx, rows[index].Blob)
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, fmt.Errorf("%w: message document blob", ErrNotFound)
+			}
+
+			if err != nil {
+				return nil, fmt.Errorf("read message document blob: %w", err)
+			}
+		}
+
+		docs = append(docs, doc)
+	}
+
+	return docs, nil
 }
