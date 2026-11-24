@@ -617,6 +617,110 @@ func TestDSTBucketingBerlinAndMidnight(t *testing.T) {
 	eq(t, midnight.Days[1].Messages, int64(4))
 }
 
+func TestMidnightDSTDayBuckets(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		tz    string
+		dates []string
+	}{
+		{
+			name: "sao paulo", tz: "America/Sao_Paulo",
+			dates: []string{"2018-11-03", "2018-11-04", "2018-11-05"},
+		},
+		{
+			name: "havana", tz: "America/Havana",
+			dates: []string{"2019-03-09", "2019-03-10", "2019-03-11"},
+		},
+		{
+			name: "beirut", tz: "Asia/Beirut",
+			dates: []string{"2019-03-30", "2019-03-31", "2019-04-01"},
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			loc, err := time.LoadLocation(testCase.tz)
+			if err != nil {
+				t.Skipf("tzdata unavailable: %v", err)
+			}
+
+			fx := newFixture(t, sources.Empty())
+			counts := []int64{3, 5, 7}
+
+			for index, date := range testCase.dates {
+				parsed, parseErr := time.Parse(dateLayout, date)
+				if parseErr != nil {
+					t.Fatal(parseErr)
+				}
+
+				noon := time.Date(
+					parsed.Year(), parsed.Month(), parsed.Day(), 12, 0, 0, 0, loc,
+				).Unix()
+				fx.ingest(t, aggregateXML("Google", "mid-"+date, "example.com",
+					noon-12*3600, noon+12*3600, "reject", 100,
+					"192.0.2.1", counts[index], "pass", "fail", "none",
+					"example.com", "example.com", "pass", "s1", ""))
+			}
+
+			query := "from=" + testCase.dates[0] + "&to=" + testCase.dates[2] +
+				"&tz=" + testCase.tz
+			overview := overviewFor(t, fx, query)
+			eq(t, len(overview.Days), 3)
+
+			gotDates := []string{
+				overview.Days[0].Date,
+				overview.Days[1].Date,
+				overview.Days[2].Date,
+			}
+			eqSlice(t, gotDates, testCase.dates)
+
+			for index := range counts {
+				eq(t, overview.Days[index].Messages, counts[index])
+			}
+
+			single := overviewFor(t, fx, "from="+testCase.dates[1]+"&to="+testCase.dates[1]+
+				"&tz="+testCase.tz)
+			eq(t, len(single.Days), 1)
+			eq(t, single.Days[0].Date, testCase.dates[1])
+			eq(t, single.Days[0].Messages, counts[1])
+		})
+	}
+}
+
+func TestDayStartMidnightDST(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		tz   string
+		date string
+		want string
+	}{
+		{tz: "America/Sao_Paulo", date: "2018-11-04", want: "2018-11-04 01:00"},
+		{tz: "America/Havana", date: "2019-03-10", want: "2019-03-10 01:00"},
+		{tz: "Asia/Beirut", date: "2019-03-31", want: "2019-03-31 01:00"},
+		{tz: "America/Sao_Paulo", date: "2018-11-03", want: "2018-11-03 00:00"},
+	}
+
+	for _, testCase := range cases {
+		loc, err := time.LoadLocation(testCase.tz)
+		if err != nil {
+			t.Skipf("tzdata unavailable: %v", err)
+		}
+
+		civil, err := parseCivilDate(testCase.date)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		got := time.Unix(civil.dayStart(loc), 0).In(loc).Format("2006-01-02 15:04")
+		eq(t, got, testCase.want)
+	}
+}
+
 func reportsFor(t *testing.T, fx *fixture, rawQuery string) ReportsResponse {
 	t.Helper()
 
