@@ -150,6 +150,11 @@ func (fetcher *Fetcher) syncAndFetch(
 		return 0, fmt.Errorf("search: %w", err)
 	}
 
+	err = fetcher.setPending(ctx, name, int64(len(uids)))
+	if err != nil {
+		return 0, err
+	}
+
 	count := 0
 
 	for start := 0; start < len(uids); start += uidBatch {
@@ -158,13 +163,20 @@ func (fetcher *Fetcher) syncAndFetch(
 		var advanced int
 
 		next, advanced, err = fetcher.fetchBatch(
-			ctx, session, name, uids[start:end], next, info.UIDValidity,
+			ctx, session, name, uids[start:end], next, info.UIDValidity, len(uids)-count,
 		)
 		count += advanced
 
 		if err != nil {
-			return count, err
+			pendingErr := fetcher.setPending(ctx, name, int64(len(uids)-count))
+
+			return count, errors.Join(err, pendingErr)
 		}
+	}
+
+	err = fetcher.setPending(ctx, name, 0)
+	if err != nil {
+		return count, err
 	}
 
 	return count, nil
@@ -176,6 +188,7 @@ func (fetcher *Fetcher) fetchBatch(
 	name string,
 	uids []uint32,
 	next, validity uint32,
+	remaining int,
 ) (uint32, int, error) {
 	meta, err := session.UIDFetch(ctx, uids, sectionMeta, 0)
 	if err != nil {
@@ -194,6 +207,13 @@ func (fetcher *Fetcher) fetchBatch(
 	// when the message is oversized, instead of the whole batch.
 	for _, uid := range uids {
 		if uid < next {
+			remaining--
+
+			err = fetcher.setPending(ctx, name, int64(remaining))
+			if err != nil {
+				return next, advanced, err
+			}
+
 			continue
 		}
 
@@ -215,6 +235,12 @@ func (fetcher *Fetcher) fetchBatch(
 		}
 
 		advanced++
+		remaining--
+
+		err = fetcher.setPending(ctx, name, int64(remaining))
+		if err != nil {
+			return next, advanced, err
+		}
 	}
 
 	return next, advanced, nil

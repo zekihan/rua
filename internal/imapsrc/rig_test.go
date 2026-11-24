@@ -204,7 +204,9 @@ type mailboxRow struct {
 	LastStart   int64
 	LastEnd     int64
 	LastSuccess int64
+	Pending     int64
 	HasSuccess  bool
+	HasPending  bool
 }
 
 func (built *rig) mailbox(t *testing.T, name string) mailboxRow {
@@ -218,12 +220,13 @@ func (built *rig) mailbox(t *testing.T, name string) mailboxRow {
 		LastStart   sql.NullInt64 `db:"last_fetch_start"`
 		LastEnd     sql.NullInt64 `db:"last_fetch_end"`
 		LastSuccess sql.NullInt64 `db:"last_success"`
+		Pending     sql.NullInt64 `db:"pending"`
 	}
 
 	err := built.database.Read(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
 		return tx.GetContext(ctx, &row, `
 			SELECT uidvalidity, next_uid, last_result, last_error,
-				last_fetch_start, last_fetch_end, last_success
+				last_fetch_start, last_fetch_end, last_success, pending
 			FROM mailboxes WHERE name = ?`, name)
 	})
 	if err != nil {
@@ -249,6 +252,8 @@ func (built *rig) mailbox(t *testing.T, name string) mailboxRow {
 		LastEnd:     row.LastEnd.Int64,
 		LastSuccess: row.LastSuccess.Int64,
 		HasSuccess:  row.LastSuccess.Valid,
+		Pending:     row.Pending.Int64,
+		HasPending:  row.Pending.Valid,
 	}
 }
 

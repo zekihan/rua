@@ -1005,6 +1005,23 @@ func TestStatusStaleConfiguredOnly(t *testing.T) {
 	eq(t, statusFor(t, fx).Stale, true)
 }
 
+func TestStatusMailboxPending(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+	fx.exec(
+		t,
+		`INSERT INTO mailboxes (name, uidvalidity, next_uid, pending) VALUES ('INBOX', 1, 10, 7)`,
+	)
+
+	status := statusFor(t, fx)
+	eq(t, len(status.Mailboxes), 1)
+
+	if status.Mailboxes[0].Pending == nil || *status.Mailboxes[0].Pending != 7 {
+		t.Fatalf("pending = %v", status.Mailboxes[0].Pending)
+	}
+}
+
 func TestPolicyChangesIgnoreLaggingReportersAndDefaults(t *testing.T) {
 	t.Parallel()
 

@@ -18,6 +18,7 @@ type mailboxDBRow struct {
 	Name        string        `db:"name"`
 	LastError   string        `db:"last_error"`
 	LastResult  string        `db:"last_result"`
+	Pending     sql.NullInt64 `db:"pending"`
 	LastStart   sql.NullInt64 `db:"last_fetch_start"`
 	LastEnd     sql.NullInt64 `db:"last_fetch_end"`
 	LastSuccess sql.NullInt64 `db:"last_success"`
@@ -51,7 +52,7 @@ func (svc *Service) loadMailboxes(
 	var rows []mailboxDBRow
 
 	err := tx.SelectContext(ctx, &rows, `SELECT name, uidvalidity, next_uid,
-		last_fetch_start, last_fetch_end, last_result, last_error, last_success
+		last_fetch_start, last_fetch_end, last_result, last_error, last_success, pending
 		FROM mailboxes ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("load mailboxes: %w", err)
@@ -75,7 +76,7 @@ func mailboxStatuses(mailboxes []mailboxDBRow, configured []string) []MailboxSta
 		row := &mailboxes[index]
 		seen[row.Name] = true
 		statuses = append(statuses, MailboxStatus{
-			Pending:        nil,
+			Pending:        nullIntPtr(row.Pending),
 			LastFetchStart: nullIntPtr(row.LastStart),
 			LastFetchEnd:   nullIntPtr(row.LastEnd),
 			LastSuccessAt:  nullIntPtr(row.LastSuccess),
