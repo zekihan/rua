@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feedback xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <report_metadata>
+    <org_name>Outlook</org_name><email>dmarc@example.net</email>
+    <report_id>6e5406ef-2518-44b0-be4f-aaf94f0d8880</report_id>
+    <date_range><begin>1704067200</begin><end>1704153600</end></date_range>
+  </report_metadata>
+  <policy_published><domain>example.org</domain><p>reject</p><pct>100</pct></policy_published>
+  <record>
+    <row>
+      <source_ip>2001:0DB8:0000:0000:0000:0000:0000:0020</source_ip><count>1</count>
+      <policy_evaluated>
+        <disposition>none</disposition><dkim>fail</dkim><spf>fail</spf>
+        <reason><type>local_policy</type><comment>Delivered by receiver policy</comment></reason>
+      </policy_evaluated>
+    </row>
+    <identifiers>
+      <envelope_to>EXAMPLE.NET</envelope_to><envelope_from>EXAMPLE.ORG</envelope_from>
+      <header_from>example.org</header_from>
+    </identifiers>
+    <auth_results><spf><domain>example.org</domain><scope>helo</scope><result>softfail</result></spf></auth_results>
+  </record>
+</feedback>

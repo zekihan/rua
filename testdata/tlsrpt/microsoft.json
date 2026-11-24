@@ -1,0 +1,36 @@
+{
+  "organization-name": "Microsoft Corporation",
+  "date-range": {
+    "start-datetime": "2024-01-01T00:00:00+00:00",
+    "end-datetime": "2024-01-02T00:00:00+00:00"
+  },
+  "contact-info": "https://postmaster.example.net/",
+  "report-id": "example.org:2024-01-01",
+  "policies": [
+    {
+      "policy": {
+        "policy-type": "sts",
+        "policy-string": ["version: STSv1", "mode: enforce", "mx: *.mail.example.org", "max_age: 86400"],
+        "policy-domain": "EXAMPLE.ORG",
+        "mx-host": ["*.MAIL.EXAMPLE.ORG", "mx.example.org"]
+      },
+      "summary": { "total-successful-session-count": 5000000000, "total-failure-session-count": 2 },
+      "failure-details": [
+        {
+          "result-type": "certificate-expired",
+          "sending-mta-ip": "2001:db8::20",
+          "receiving-ip": "203.0.113.20",
+          "receiving-mx-hostname": "MX.MAIL.EXAMPLE.ORG",
+          "receiving-mx-helo": "mx.mail.example.org",
+          "failed-session-count": 2,
+          "additional-information": "https://postmaster.example.net/cert",
+          "failure-reason-code": "certificate has expired"
+        }
+      ]
+    },
+    {
+      "policy": { "policy-type": "no-policy-found", "policy-domain": "example.net", "mx-host": "MX.EXAMPLE.NET" },
+      "summary": { "total-successful-session-count": 9, "total-failure-session-count": 0 }
+    }
+  ]
+}
