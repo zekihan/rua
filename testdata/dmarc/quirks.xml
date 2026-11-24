@@ -1,0 +1,23 @@
+<feedback>
+  <report_metadata>
+    <org_name>  Example Receiver </org_name><report_id>  quirk-1 </report_id>
+    <date_range><begin> 1704067200 </begin><end> 1704153599 </end></date_range>
+  </report_metadata>
+  <policy_published><domain> EXAMPLE.COM </domain><p> NONE </p><pct> 0 </pct></policy_published>
+  <record>
+    <row>
+      <source_ip> 203.0.113.40 </source_ip><count> 9223372036854775807 </count>
+      <policy_evaluated>
+        <disposition> PASS </disposition><dkim> PASS </dkim><spf> FAIL </spf>
+        <reason><type> FORWARDED </type><comment> via example.org </comment></reason>
+        <reason><type> OTHER </type></reason>
+      </policy_evaluated>
+    </row>
+    <identifiers><envelope_from/><header_from> EXAMPLE.COM </header_from></identifiers>
+    <auth_results>
+      <extension><spf><domain>example.org</domain></spf></extension>
+      <dkim><domain> EXAMPLE.COM </domain><selector> Mail </selector><result> PaSs </result><human_result> signature verified </human_result></dkim>
+      <spf><domain> EXAMPLE.NET </domain><result> NONE </result></spf>
+    </auth_results>
+  </record>
+</feedback>

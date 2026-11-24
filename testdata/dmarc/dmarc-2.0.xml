@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<feedback xmlns="urn:ietf:params:xml:ns:dmarc-2.0">
+  <report_metadata>
+    <org_name>Example Receiver</org_name><report_id>bis-1</report_id>
+    <date_range><begin>1704067200</begin><end>1704153599</end></date_range>
+  </report_metadata>
+  <policy_published>
+    <domain>example.org</domain><discovery_method>treewalk</discovery_method>
+    <p>reject</p><sp>quarantine</sp><np>reject</np><testing>y</testing>
+  </policy_published>
+  <extension xmlns:vendor="urn:example:reporting"><vendor:metric>unused</vendor:metric></extension>
+  <record>
+    <row>
+      <source_ip>2001:db8::50</source_ip><count>0</count>
+      <policy_evaluated><disposition>none</disposition><dkim>fail</dkim><spf>pass</spf></policy_evaluated>
+    </row>
+    <identifiers><header_from>example.org</header_from></identifiers>
+    <auth_results><spf><domain>example.org</domain><scope>mfrom</scope><result>pass</result></spf></auth_results>
+  </record>
+</feedback>
