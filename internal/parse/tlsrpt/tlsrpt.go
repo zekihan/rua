@@ -20,6 +20,7 @@ var (
 	errMissingSummary  = errors.New("missing TLS policy summary")
 	errTooManyFailures = errors.New("too many TLS failure details")
 	errFailureArray    = errors.New("TLS failure details must be an array")
+	errMissingFailure  = errors.New("missing TLS failed session count")
 )
 
 type stringsOrString []string
@@ -77,6 +78,7 @@ type policy struct {
 
 //nolint:tagliatelle // The JSON keys follow the RFC 8460 schema and field descriptions.
 type failure struct {
+	Count   *int64 `json:"failed-session-count"`
 	Type    string `json:"result-type"`
 	Sending string `json:"sending-mta-ip"`
 	IP      string `json:"receiving-ip"`
@@ -85,7 +87,6 @@ type failure struct {
 	Code    string `json:"failure-reason-code"`
 	URI     string `json:"additional-information"`
 	InfoURI string `json:"additional-info-uri"`
-	Count   int64  `json:"failed-session-count"`
 }
 
 type failureDetails []failure
@@ -194,7 +195,11 @@ func (wire *policy) parsed() (report.TLSPolicy, error) {
 
 	for index := range wire.Failures {
 		entry := &wire.Failures[index]
-		if !validCount(entry.Count) {
+		if entry.Count == nil {
+			return report.TLSPolicy{}, errMissingFailure
+		}
+
+		if !validCount(*entry.Count) {
 			return report.TLSPolicy{}, errSessionCount
 		}
 
@@ -218,7 +223,7 @@ func (wire *failure) parsed() report.TLSFailure {
 		ReceivingMXHelo:     text.LowerShort(wire.Helo),
 		FailureReasonCode:   text.Limit(wire.Code, report.MaxShort),
 		AdditionalInfoURI:   text.Limit(uri, report.MaxLong),
-		FailedSessions:      wire.Count,
+		FailedSessions:      *wire.Count,
 	}
 }
 

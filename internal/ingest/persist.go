@@ -35,6 +35,7 @@ const (
 
 type messageWrite struct {
 	preserved       map[reportIdentity][]int64
+	failureDocs     []document
 	messageError    string
 	result          Result
 	aggregateRows   int
@@ -156,7 +157,7 @@ func (pipe *Pipeline) Ingest(ctx context.Context, raw []byte, src Source) (Resul
 		if len(raw) <= MaxMessageBytes {
 			stored := raw
 			if state.result.Class == report.ClassFailure {
-				stored = sanitizeFailureMessage(raw)
+				stored = sanitizeFailureMessage(raw, state.failureDocs)
 			}
 
 			blob, err = store.PutBlob(ctx, tx, stored)
@@ -311,6 +312,10 @@ func parseMessage(
 ) error {
 	ext := newExtraction(nil)
 	ext.accept = func(doc document) error {
+		if doc.class == report.ClassFailure {
+			state.failureDocs = append(state.failureDocs, doc)
+		}
+
 		return state.storeDocument(ctx, tx, ext, doc)
 	}
 

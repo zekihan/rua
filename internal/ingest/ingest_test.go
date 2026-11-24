@@ -464,6 +464,166 @@ func TestFailureBlobSanitized(t *testing.T) {
 	)
 }
 
+type storedFailureRow struct {
+	Domain      string `db:"domain"`
+	SourceIP    string `db:"source_ip"`
+	AuthFailure string `db:"auth_failure"`
+	OrigFrom    string `db:"orig_from"`
+	OrigTo      string `db:"orig_to"`
+	OrigSubject string `db:"orig_subject"`
+	Arrival     int64  `db:"arrival"`
+}
+
+func storedFailureRows(t *testing.T, st *store.Store) []storedFailureRow {
+	t.Helper()
+
+	var rows []storedFailureRow
+
+	err := st.Read(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		err := tx.SelectContext(ctx, &rows, `SELECT arrival, domain, source_ip, auth_failure,
+			orig_from, orig_to, orig_subject FROM failure_reports ORDER BY domain, orig_subject`)
+		if err != nil {
+			return fmt.Errorf("read failure rows: %w", err)
+		}
+
+		return nil
+	})
+	mustSucceed(t, err)
+
+	return rows
+}
+
+func feedbackReportPart(boundary, domain, subject string) string {
+	feedback := "Feedback-Type: auth-failure\r\nVersion: 1\r\nAuth-Failure: dmarc\r\n" +
+		"Arrival-Date: Mon, 1 Jan 2024 01:02:03 +0000\r\nSource-IP: 198.51.100.10\r\n" +
+		"Reported-Domain: " + domain + "\r\n"
+	original := "From: sender@example.com\r\nTo: recipient@example.net\r\n" +
+		"Subject: " + subject + "\r\n\r\nprivate original body " + subject
+
+	return multipart(
+		"report; report-type=feedback-report",
+		boundary,
+		"Content-Type: message/feedback-report\r\n\r\n"+feedback+"\r\ntrailing feedback secret "+domain,
+		"Content-Type: message/rfc822\r\n\r\n"+original,
+	)
+}
+
+func TestFailureBlobNestedTrailingAndMultiple(t *testing.T) {
+	pipe, st := fixtureStore(t, defaultOptions())
+	raw := []byte(
+		"From: reporter@example.net\r\nTo: rua@example.com\r\nSubject: failure report\r\n" +
+			"Date: Tue, 03 Jun 2025 12:00:00 +0000\r\nMessage-ID: <nested@example.net>\r\n" +
+			"MIME-Version: 1.0\r\n" +
+			multipart("mixed", "outer",
+				"Content-Type: text/plain\r\n\r\nhuman secret explanation",
+				feedbackReportPart("inner-a", "a.example.com", "original-a"),
+				feedbackReportPart("inner-b", "b.example.com", "original-b")),
+	)
+
+	result := mustIngest(t, pipe, raw)
+	assertEqual(t, result.Class, report.ClassFailure)
+	assertEqual(t, result.Status, StatusOK)
+
+	want := []storedFailureRow{
+		{
+			Arrival: 1704070923, Domain: "a.example.com", SourceIP: "198.51.100.10",
+			AuthFailure: "dmarc", OrigFrom: "sender@example.com",
+			OrigTo: "recipient@example.net", OrigSubject: "original-a",
+		},
+		{
+			Arrival: 1704070923, Domain: "b.example.com", SourceIP: "198.51.100.10",
+			AuthFailure: "dmarc", OrigFrom: "sender@example.com",
+			OrigTo: "recipient@example.net", OrigSubject: "original-b",
+		},
+	}
+	if got := storedFailureRows(t, st); !slices.Equal(got, want) {
+		t.Fatalf("failure rows = %+v, want %+v", got, want)
+	}
+
+	blob := storedMessageBlob(t, st, result.MessageID)
+	for _, marker := range []string{
+		"trailing feedback secret", "private original body", "human secret explanation",
+	} {
+		if bytes.Contains(blob, []byte(marker)) {
+			t.Fatalf("stored failure blob leaks %q: %q", marker, blob)
+		}
+	}
+
+	if !bytes.Contains(blob, []byte("Subject: failure report")) ||
+		!bytes.Contains(blob, []byte("Message-ID: <nested@example.net>")) ||
+		bytes.Count(blob, []byte("Content-Type: message/feedback-report")) != 2 ||
+		bytes.Count(blob, []byte("Content-Type: text/rfc822-headers")) != 2 {
+		t.Fatalf("stored failure blob has wrong structure: %q", blob)
+	}
+
+	rawDigest := store.Digest(raw)
+	assertEqual(
+		t,
+		scalar[bool](t, st, "SELECT EXISTS(SELECT 1 FROM messages WHERE id=? AND sha256=?)",
+			result.MessageID, rawDigest),
+		true,
+	)
+
+	_, err := pipe.Reparse(t.Context())
+	mustSucceed(t, err)
+
+	if got := storedFailureRows(t, st); !slices.Equal(got, want) {
+		t.Fatalf("failure rows after reparse = %+v, want %+v", got, want)
+	}
+
+	if reparsed := storedMessageBlob(t, st, result.MessageID); !bytes.Equal(reparsed, blob) {
+		t.Fatalf("sanitized blob not stable across reparse:\n%q\nwant:\n%q", reparsed, blob)
+	}
+}
+
+func finishWithin(t *testing.T, name string, fn func()) {
+	t.Helper()
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		fn()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s did not finish", name)
+	}
+}
+
+var truncatedMultipart = map[string]string{
+	"missing closing boundary": "From: reporter@example.net\r\n" +
+		"Content-Type: multipart/report; report-type=feedback-report; boundary=fb\r\n\r\n" +
+		"--fb\r\nContent-Type: message/feedback-report\r\n\r\nFeedback-Type: auth-failure\r\n",
+	"truncated part headers": "From: reporter@example.net\r\n" +
+		"Content-Type: multipart/report; report-type=feedback-report; boundary=fb\r\n\r\n" +
+		"--fb\r\nContent-Type: message/feedback-repor",
+	"truncated nested part headers": "From: reporter@example.net\r\n" +
+		"Content-Type: multipart/mixed; boundary=outer\r\n\r\n" +
+		"--outer\r\nContent-Type: text/plain\r\nX-Trunc",
+}
+
+func TestSanitizeTruncatedMultipart(t *testing.T) {
+	for name, raw := range truncatedMultipart {
+		finishWithin(t, name, func() { _ = sanitizeFailureMessage([]byte(raw), nil) })
+	}
+}
+
+func TestIngestTruncatedMultipart(t *testing.T) {
+	for name, raw := range truncatedMultipart {
+		pipe, _ := fixtureStore(t, defaultOptions())
+
+		var source Source
+
+		finishWithin(t, name, func() {
+			_, _ = pipe.Ingest(t.Context(), []byte(raw), source)
+		})
+	}
+}
+
 func TestSkipIdenticalHeaders(t *testing.T) {
 	fakeParsers(t)
 
