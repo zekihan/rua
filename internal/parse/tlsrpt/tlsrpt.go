@@ -21,6 +21,7 @@ var (
 	errTooManyFailures = errors.New("too many TLS failure details")
 	errFailureArray    = errors.New("TLS failure details must be an array")
 	errMissingFailure  = errors.New("missing TLS failed session count")
+	errDateRange       = errors.New("TLS date range out of range")
 )
 
 type stringsOrString []string
@@ -142,6 +143,11 @@ func Parse(data []byte) (*report.TLS, error) {
 	if strings.TrimSpace(doc.Org) == "" || strings.TrimSpace(doc.ID) == "" ||
 		startErr != nil || endErr != nil || start.After(end) || len(doc.Policies) == 0 {
 		return nil, errMetadata
+	}
+
+	if start.Unix() < report.MinReportUnix || start.Unix() >= report.MaxReportUnix ||
+		end.Unix() < report.MinReportUnix || end.Unix() >= report.MaxReportUnix {
+		return nil, errDateRange
 	}
 
 	out := &report.TLS{

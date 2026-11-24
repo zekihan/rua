@@ -8,6 +8,13 @@ package report
 // reparsed.
 const ParserVersion = 2
 
+// Report window bounds in unix seconds: [1990-01-01, 2200-01-01) UTC.
+// Report timestamps outside this range are rejected at parse time.
+const (
+	MinReportUnix = 631152000
+	MaxReportUnix = 7258118400
+)
+
 // Class is the classification of a whole message.
 type Class string
 
