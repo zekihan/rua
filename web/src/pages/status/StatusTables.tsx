@@ -59,7 +59,7 @@ export function Mailboxes({ rows, tz }: { rows: MailboxStatus[]; tz: string }) {
             ))}
           </ul>
           <TableScroll label="Mailbox checkpoints" className="max-sm:hidden">
-            <table className="min-w-[40rem]" data-testid="mailboxes-table">
+            <table className="min-w-[52rem]" data-testid="mailboxes-table">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -67,6 +67,7 @@ export function Mailboxes({ rows, tz }: { rows: MailboxStatus[]; tz: string }) {
                   <th className="num">Next UID</th>
                   <th className="num">Pending</th>
                   <th>Last fetch</th>
+                  <th>Last success</th>
                   <th>Result</th>
                 </tr>
               </thead>
@@ -97,12 +98,12 @@ export function Mailboxes({ rows, tz }: { rows: MailboxStatus[]; tz: string }) {
                         formatPending(m.pending)
                       )}
                     </td>
-                    <td className="small">
+                    <td className="small tabular-nums">
                       {formatUnixDateTime(m.lastFetchStartAt, tz)} –{" "}
                       {formatUnixDateTime(m.lastFetchEndAt, tz)}
-                      <div className="muted">
-                        last success {formatUnixDateTime(m.lastSuccessAt, tz)}
-                      </div>
+                    </td>
+                    <td className="small tabular-nums">
+                      {formatUnixDateTime(m.lastSuccessAt, tz)}
                     </td>
                     <td>
                       {m.lastResult || "—"}

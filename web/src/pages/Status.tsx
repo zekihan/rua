@@ -43,27 +43,25 @@ export default function StatusPage(p: PageProps) {
             </p>
           )}
           <FetchPanel status={d} tz={p.tz} />
+          <Mailboxes rows={d.mailboxes} tz={p.tz} />
           <div className="grid min-w-0 items-start gap-4 lg:grid-cols-[1fr_1.45fr]">
-            <div className="grid min-w-0 gap-4">
-              <Mailboxes rows={d.mailboxes} tz={p.tz} />
-              <section className="card">
-                <h2>Conflicting reports</h2>
-                {d.conflicts.length === 0 ? (
-                  <Empty>No conflicts.</Empty>
-                ) : (
-                  <ul className="space-y-1 [overflow-wrap:anywhere]">
-                    {d.conflicts.map((c) => (
-                      <li key={c.id}>
-                        <a href={p.makeHref("report", { id: String(c.id) })}>
-                          #{c.id} {c.org} — {c.domain}
-                        </a>{" "}
-                        <span className="badge badge-fail">conflict</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </section>
-            </div>
+            <section className="card">
+              <h2>Conflicting reports</h2>
+              {d.conflicts.length === 0 ? (
+                <Empty>No conflicts.</Empty>
+              ) : (
+                <ul className="space-y-1 [overflow-wrap:anywhere]">
+                  {d.conflicts.map((c) => (
+                    <li key={c.id}>
+                      <a href={p.makeHref("report", { id: String(c.id) })}>
+                        #{c.id} {c.org} — {c.domain}
+                      </a>{" "}
+                      <span className="badge badge-fail">conflict</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
             <MessageCounts rows={d.classes} />
           </div>
           <MessageTable
