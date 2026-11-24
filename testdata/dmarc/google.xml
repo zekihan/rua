@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feedback>
+  <version>1.0</version>
+  <report_metadata>
+    <org_name>Google</org_name>
+    <email>dmarc-noreply@example.net</email>
+    <extra_contact_info>https://reports.example.net/help</extra_contact_info>
+    <report_id>12345678901234567890</report_id>
+    <date_range><begin>1704067200</begin><end>1704153599</end></date_range>
+  </report_metadata>
+  <policy_published>
+    <domain>example.com</domain><adkim>r</adkim><aspf>s</aspf>
+    <p>reject</p><sp>quarantine</sp><pct>100</pct><fo>1</fo>
+  </policy_published>
+  <record>
+    <row>
+      <source_ip>192.0.2.10</source_ip><count>42</count>
+      <policy_evaluated><disposition>none</disposition><dkim>pass</dkim><spf>fail</spf></policy_evaluated>
+    </row>
+    <identifiers><header_from>example.com</header_from></identifiers>
+    <auth_results>
+      <dkim><domain>example.com</domain><result>pass</result><selector>mail</selector></dkim>
+      <dkim><domain>example.net</domain><result>fail</result><selector>backup</selector></dkim>
+      <spf><domain>example.net</domain><scope>mfrom</scope><result>pass</result></spf>
+    </auth_results>
+  </record>
+  <record>
+    <row><source_ip>192.0.2.11</source_ip><count>1</count></row>
+    <identifiers><header_from>example.com</header_from></identifiers>
+  </record>
+</feedback>

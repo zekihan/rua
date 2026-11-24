@@ -1,0 +1,8 @@
+Feedback-Type: auth-failure
+User-Agent: Example Report Generator
+Version: 1
+Auth-Failure: dmarc
+Arrival-Date: Mon, 1 Jan 2024 01:02:03 +0000
+Source-IP: 198.51.100.10
+Reported-Domain: EXAMPLE.COM
+Original-Mail-From: <bounce@example.com>

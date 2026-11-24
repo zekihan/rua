@@ -1,0 +1,6 @@
+Feedback-Type: AUTH-FAILURE
+Version: 1
+Auth-Failure: SPF
+Arrival-Date: unknown
+Source-IP: 2001:db8::12
+Reported-Domain: EXAMPLE.ORG

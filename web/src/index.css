@@ -1,0 +1,186 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-control: var(--control);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-pass: var(--pass);
+  --color-forwarded: var(--forwarded);
+  --color-fail: var(--fail);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+:root {
+  color-scheme: light;
+  --bg: #f4f6fa;
+  --surface: #ffffff;
+  --surface-2: #eef2f7;
+  --line: #dbe2ec;
+  --control: #8797aa;
+  --ink: #18263a;
+  --ink-2: #4d5f75;
+  --accent: #205e99;
+  --accent-ink: #ffffff;
+  --pass: #16748a;
+  --forwarded: #7151a0;
+  --fail: #a65319;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #111923;
+    --surface: #1a2533;
+    --surface-2: #202e3d;
+    --line: #334457;
+    --control: #6d8199;
+    --ink: #eaf0f9;
+    --ink-2: #afbed0;
+    --accent: #91c5ff;
+    --accent-ink: #122034;
+    --pass: #59bfd1;
+    --forwarded: #be9be8;
+    --fail: #f5a169;
+  }
+}
+
+@layer base {
+  body {
+    @apply bg-bg font-sans text-sm text-ink antialiased;
+  }
+
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-accent;
+  }
+
+  a,
+  button,
+  select,
+  input,
+  summary {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button:not(:disabled),
+  select,
+  input[type="checkbox"],
+  summary {
+    @apply cursor-pointer;
+  }
+}
+
+@layer components {
+  .shell {
+    @apply mx-auto w-full max-w-7xl px-4 sm:px-7;
+  }
+
+  .page {
+    @apply grid min-w-0 grid-cols-1 gap-4;
+  }
+
+  .card {
+    @apply min-w-0 rounded-xl border border-line bg-surface p-3.5 sm:p-5;
+  }
+
+  .card > h2 {
+    @apply mb-3 text-base font-semibold tracking-tight;
+  }
+
+  .input {
+    @apply block min-h-10 w-full min-w-0 rounded-md border border-control/65 bg-surface px-2.5 py-1.5 text-sm font-normal text-ink;
+  }
+
+  .btn {
+    @apply inline-flex min-h-10 items-center justify-center rounded-md bg-accent px-3.5 py-2 font-semibold text-accent-ink hover:brightness-110 disabled:cursor-default disabled:opacity-55;
+  }
+
+  .btn-secondary {
+    @apply border border-line bg-surface text-ink hover:bg-surface-2;
+  }
+
+  .link,
+  td a,
+  li a {
+    @apply font-medium text-accent underline-offset-2 hover:underline;
+  }
+
+  .table-wrap {
+    @apply min-w-0 max-w-full overflow-x-auto rounded-lg border border-line;
+  }
+
+  .table-wrap table {
+    @apply w-full border-collapse text-left;
+  }
+
+  .table-wrap th,
+  .table-wrap td {
+    @apply border-b border-line px-3 py-2.5 align-top;
+  }
+
+  .table-wrap th {
+    @apply whitespace-nowrap bg-surface-2 text-xs font-semibold text-ink-2;
+  }
+
+  .table-wrap td {
+    @apply max-w-88 [overflow-wrap:anywhere];
+  }
+
+  .table-wrap tr:last-child td {
+    @apply border-b-0;
+  }
+
+  .table-wrap tbody tr:hover {
+    @apply bg-surface-2/65;
+  }
+
+  .table-wrap .num {
+    @apply text-right whitespace-nowrap tabular-nums;
+  }
+
+  .table-wrap .unknown-row {
+    @apply bg-accent/6;
+  }
+
+  .unknown-row td:first-child {
+    @apply border-l-2 border-l-accent/65;
+  }
+
+  .mono {
+    @apply font-mono text-[0.86em] [overflow-wrap:anywhere];
+  }
+
+  .small {
+    @apply text-xs;
+  }
+
+  .muted {
+    @apply text-ink-2;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-md border border-line bg-surface-2 px-1.5 py-0.5 text-xs font-semibold whitespace-nowrap text-ink-2;
+  }
+
+  .badge-unknown {
+    @apply border-accent/25 bg-accent/10 text-accent;
+  }
+
+  .badge-pass {
+    @apply border-pass/30 bg-pass/10 text-pass;
+  }
+
+  .badge-forwarded {
+    @apply border-forwarded/30 bg-forwarded/10 text-forwarded;
+  }
+
+  .badge-fail {
+    @apply border-fail/30 bg-fail/10 text-fail;
+  }
+}
