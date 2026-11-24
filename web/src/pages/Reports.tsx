@@ -3,6 +3,7 @@ import { api } from "../api/client.ts";
 import type { ReportSummary } from "../api/types.ts";
 import type { PageProps } from "../page-props.ts";
 import type { Filters } from "../url.ts";
+import { Receivers } from "./reports/Receivers.tsx";
 import { ReportMarkers } from "../components/ReportMarkers.tsx";
 import {
   Loading,
@@ -50,16 +51,6 @@ function ReportFilters({
           <option value="tls-report">TLS report</option>
         </select>
       </Field>
-      <Field label="Verdict">
-        <select
-          className="input opacity-65"
-          data-testid="reports-verdict-filter"
-          disabled
-          defaultValue=""
-        >
-          <option value="">Unavailable for reports</option>
-        </select>
-      </Field>
     </div>
   );
 }
@@ -74,58 +65,101 @@ function ReportTable({
   makeHref: PageProps["makeHref"];
 }) {
   return (
-    <TableScroll label="Reports">
-      <table className="min-w-[49rem] bg-surface" data-testid="reports-table">
-        <thead>
-          <tr>
-            <th scope="col">Reporter</th>
-            <th scope="col">Domain</th>
-            <th scope="col">Window</th>
-            <th scope="col" className="num">
-              Messages
-            </th>
-            <th scope="col" className="num">
-              Pass rate / TLS failed
-            </th>
-            <th scope="col">Markers</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((report) => {
-            const tls = report.kind === "tls-report";
-            return (
-              <tr key={report.id}>
-                <td>
-                  <a href={makeHref("report", { id: String(report.id) })}>
-                    {report.org || report.reportId || `#${report.id}`}
-                  </a>
-                  <p className="small muted">
-                    {tls ? "TLS" : "DMARC"} · {report.date}
-                  </p>
-                </td>
-                <td>{report.domain || "—"}</td>
-                <td className="text-xs tabular-nums">
-                  {formatUnixDateTime(report.begin, tz)}{" "}
-                  <span className="text-ink-2">to</span>{" "}
-                  {formatUnixDateTime(report.end, tz)}
-                </td>
-                <td className="num">
-                  {tls ? "—" : formatNumber(report.messages)}
-                </td>
-                <td className="num">
-                  {tls
-                    ? `${formatNumber(report.tlsFailed)} failed`
-                    : formatPercent(report.passRate)}
-                </td>
-                <td>
-                  <ReportMarkers report={report} />
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </TableScroll>
+    <>
+      <ul className="grid gap-2 sm:hidden" data-testid="reports-cards">
+        {rows.map((report) => {
+          const tls = report.kind === "tls-report";
+          return (
+            <li
+              key={report.id}
+              data-testid="report-card"
+              className="space-y-1 rounded-lg border border-line bg-surface p-3"
+            >
+              <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+                <a
+                  className="font-semibold [overflow-wrap:anywhere]"
+                  href={makeHref("report", { id: String(report.id) })}
+                >
+                  {report.org || report.reportId || `#${report.id}`}
+                </a>
+                <span className="small muted tabular-nums">
+                  {tls ? "TLS" : "DMARC"} · {report.date}
+                </span>
+              </div>
+              <p className="[overflow-wrap:anywhere]">{report.domain || "—"}</p>
+              <p className="small tabular-nums">
+                {tls ? (
+                  <>
+                    <span className="muted">TLS failed</span>{" "}
+                    <strong>{formatNumber(report.tlsFailed)}</strong>
+                  </>
+                ) : (
+                  <>
+                    <span className="muted">Messages</span>{" "}
+                    <strong>{formatNumber(report.messages)}</strong>
+                    <span className="muted"> · Pass rate</span>{" "}
+                    <strong>{formatPercent(report.passRate)}</strong>
+                  </>
+                )}
+              </p>
+              <ReportMarkers report={report} />
+            </li>
+          );
+        })}
+      </ul>
+      <TableScroll label="Reports" className="max-sm:hidden">
+        <table className="min-w-[49rem] bg-surface" data-testid="reports-table">
+          <thead>
+            <tr>
+              <th scope="col">Reporter</th>
+              <th scope="col">Domain</th>
+              <th scope="col">Window</th>
+              <th scope="col" className="num">
+                Messages
+              </th>
+              <th scope="col" className="num">
+                Pass rate / TLS failed
+              </th>
+              <th scope="col">Markers</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((report) => {
+              const tls = report.kind === "tls-report";
+              return (
+                <tr key={report.id}>
+                  <td>
+                    <a href={makeHref("report", { id: String(report.id) })}>
+                      {report.org || report.reportId || `#${report.id}`}
+                    </a>
+                    <p className="small muted">
+                      {tls ? "TLS" : "DMARC"} · {report.date}
+                    </p>
+                  </td>
+                  <td>{report.domain || "—"}</td>
+                  <td className="text-xs tabular-nums">
+                    {formatUnixDateTime(report.begin, tz)}{" "}
+                    <span className="text-ink-2">to</span>{" "}
+                    {formatUnixDateTime(report.end, tz)}
+                  </td>
+                  <td className="num">
+                    {tls ? "—" : formatNumber(report.messages)}
+                  </td>
+                  <td className="num">
+                    {tls
+                      ? `${formatNumber(report.tlsFailed)} failed`
+                      : formatPercent(report.passRate)}
+                  </td>
+                  <td>
+                    <ReportMarkers report={report} />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </TableScroll>
+    </>
   );
 }
 
@@ -153,6 +187,12 @@ export default function Reports({
     <div className="page">
       <PageHeading testid="reports-heading">Reports</PageHeading>
       <ReportFilters filters={state.filters} update={update} />
+      <Receivers
+        eff={eff}
+        makeHref={makeHref}
+        reporter={state.filters.reporter}
+        tz={tz}
+      />
       {!rows ? (
         query.isError ? (
           <ErrorBox error={query.error} />
