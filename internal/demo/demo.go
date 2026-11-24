@@ -80,7 +80,7 @@ const (
 
 	oversizedBytes int64 = 250 << 20
 
-	mailboxDemo = "demo"
+	mailboxDemo = Mailbox
 
 	domainCom = "example.com"
 	domainNet = "example.net"
