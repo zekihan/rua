@@ -207,11 +207,22 @@ func insertTLSPolicy(
 func (state *messageWrite) storeFailure(
 	ctx context.Context, tx *sqlx.Tx, value *report.Failure,
 ) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO failure_reports
+	_, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO failure_reports
 		(message, arrival, domain, source_ip, auth_failure, orig_from, orig_to, orig_subject)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		state.result.MessageID, value.Arrival, value.Domain, value.SourceIP, value.AuthFailure,
-		value.OriginalFrom, value.OriginalTo, value.Subject)
+		VALUES (?, COALESCE(NULLIF(?, 0), (SELECT internaldate FROM messages WHERE id = ?)),
+			?, ?, ?, ?, ?, ?)`,
+		state.result.MessageID,
+		value.Arrival,
+		state.result.MessageID,
+		value.Domain,
+		value.SourceIP,
+		value.AuthFailure,
+		value.OriginalFrom,
+		value.OriginalTo,
+		value.Subject,
+	)
 	if err != nil {
 		return fmt.Errorf("insert DMARC failure: %w", err)
 	}

@@ -228,13 +228,17 @@ func (pipe *Pipeline) Prune(ctx context.Context, days int) (int, error) {
 // reparse cannot bring its reports back; a message with surviving reports
 // keeps its blob, and its expired reports are dropped again by the
 // retention pass that follows every reparse.
+// The expiredReport condition selects reports whose own window ended before the cutoff
+// (bound twice). An original is kept while any of its copies is still
+// within retention, since deleting it would cascade to that copy.
+const expiredReport = `end < ? AND NOT EXISTS (
+	SELECT 1 FROM reports AS copy WHERE copy.duplicate_of = reports.id AND copy.end >= ?)`
+
 func applyRetention(ctx context.Context, tx *sqlx.Tx, cutoff int64) (int64, error) {
 	var messages []int64
 
 	err := tx.SelectContext(ctx, &messages, `
-		SELECT message FROM reports WHERE end < ?
-		UNION SELECT message FROM reports
-			WHERE duplicate_of IN (SELECT id FROM reports WHERE end < ?)
+		SELECT message FROM reports WHERE `+expiredReport+`
 		UNION SELECT message FROM failure_reports WHERE arrival < ?`, cutoff, cutoff, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("find expired reports: %w", err)
@@ -247,14 +251,13 @@ func applyRetention(ctx context.Context, tx *sqlx.Tx, cutoff int64) (int64, erro
 	var count int64
 
 	err = tx.GetContext(ctx, &count, `SELECT
-		(SELECT count(*) FROM reports WHERE end < ?
-			OR duplicate_of IN (SELECT id FROM reports WHERE end < ?))
+		(SELECT count(*) FROM reports WHERE `+expiredReport+`)
 		+ (SELECT count(*) FROM failure_reports WHERE arrival < ?)`, cutoff, cutoff, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("count expired reports: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM reports WHERE end < ?`, cutoff)
+	_, err = tx.ExecContext(ctx, `DELETE FROM reports WHERE `+expiredReport, cutoff, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("delete expired reports: %w", err)
 	}

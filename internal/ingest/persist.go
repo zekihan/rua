@@ -80,7 +80,8 @@ func (pipe *Pipeline) Skip(
 	) ([]byte, *message.Entity, error) {
 		state.result.Class = report.ClassOther
 		state.result.Status = StatusSkipped
-		state.messageError = "message larger than " + strconv.FormatInt(size, 10) + " bytes"
+		state.messageError = "message of " + strconv.FormatInt(size, 10) +
+			" bytes is larger than the fetch limit"
 
 		entity, err := readHeader(header)
 		if err != nil {

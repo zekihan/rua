@@ -331,7 +331,7 @@ func TestOtherFailureAndSkip(t *testing.T) {
 	assertEqual(
 		t,
 		scalar[string](t, st, "SELECT error FROM messages WHERE id=?", skipped.MessageID),
-		"message larger than 1000 bytes",
+		"message of 1000 bytes is larger than the fetch limit",
 	)
 	assertEqual(
 		t,
@@ -612,28 +612,15 @@ func TestPruneAndReplay(t *testing.T) {
 	assertEqual(t, count, 0)
 	count, err = pipe.Prune(t.Context(), 1)
 	mustSucceed(t, err)
-	assertEqual(t, count, 4)
+	// The expired copy inside the mixed message and the failure report go;
+	// the expired original stays because its conflicting copy is recent.
+	assertEqual(t, count, 2)
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM reports"), 3)
 	assertEqual(
 		t,
-		scalar[int](
-			t,
-			st,
-			"SELECT count(*) FROM messages WHERE status=? AND blob IS NULL",
-			StatusPruned,
-		),
-		2,
-	)
-	assertEqual(
-		t,
-		scalar[int](
-			t,
-			st,
-			"SELECT count(*) FROM blobs WHERE sha256=?",
-			store.Digest([]byte(oldXML)),
-		),
+		scalar[int](t, st, "SELECT count(*) FROM messages WHERE status=?", StatusPruned),
 		0,
 	)
-	assertEqual(t, scalar[string](t, st, "SELECT report_id FROM reports"), "survivor")
 	assertEqual(t, old.Status, StatusOK)
 	assertEqual(t, dupe.Status, StatusOK)
 	assertEqual(
@@ -644,12 +631,66 @@ func TestPruneAndReplay(t *testing.T) {
 
 	count, err = pipe.Reparse(t.Context())
 	mustSucceed(t, err)
-	assertEqual(t, count, 1)
-	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM reports"), 1)
+	assertEqual(t, count, 3)
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM reports"), 3)
 	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM failure_reports"), 0)
 	assertEqual(
 		t,
 		scalar[string](t, st, "SELECT status FROM messages WHERE id=?", mixed.MessageID),
 		StatusOK,
 	)
+}
+
+func TestPruneWholeMessage(t *testing.T) {
+	fakeParsers(t)
+	pipe, st := fixtureStore(
+		t,
+		Options{
+			Now: func() time.Time { return testNow }, Metrics: nil, NewIPs: nil, RetentionDays: 1,
+		},
+	)
+
+	old := mustIngest(t, pipe, []byte(oldXML))
+
+	count, err := pipe.Prune(t.Context(), 1)
+	mustSucceed(t, err)
+	assertEqual(t, count, 1)
+	assertEqual(
+		t,
+		scalar[string](t, st, "SELECT status FROM messages WHERE id=? AND blob IS NULL",
+			old.MessageID),
+		StatusPruned,
+	)
+
+	count, err = pipe.Reparse(t.Context())
+	mustSucceed(t, err)
+	assertEqual(t, count, 0)
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM reports"), 0)
+}
+
+func TestFailureWithoutArrivalUsesInternalDate(t *testing.T) {
+	fakeParsers(t)
+
+	saved := parseFailure
+	parseFailure = func(feedback, headers []byte) (*report.Failure, error) {
+		value, err := saved(feedback, headers)
+		if err == nil {
+			value.Arrival = 0
+		}
+
+		return value, err
+	}
+
+	pipe, st := fixtureStore(t, defaultOptions())
+	mustIngest(t, pipe, []byte(feedbackFixture()))
+
+	assertEqual(
+		t,
+		scalar[int64](t, st, "SELECT arrival FROM failure_reports"),
+		scalar[int64](t, st, "SELECT internaldate FROM messages"),
+	)
+
+	count, err := pipe.Prune(t.Context(), 1)
+	mustSucceed(t, err)
+	assertEqual(t, count, 0)
 }
