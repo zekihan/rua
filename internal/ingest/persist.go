@@ -36,7 +36,10 @@ const (
 type messageWrite struct {
 	preserved       map[reportIdentity][]int64
 	failureDocs     []document
+	reportDocs      []document
+	orderedDocs     []document
 	messageError    string
+	hasFailure      bool
 	result          Result
 	aggregateRows   int
 	tlsRows         int
@@ -156,8 +159,8 @@ func (pipe *Pipeline) Ingest(ctx context.Context, raw []byte, src Source) (Resul
 
 		if len(raw) <= MaxMessageBytes {
 			stored := raw
-			if state.result.Class == report.ClassFailure {
-				stored = sanitizeFailureMessage(raw, state.failureDocs)
+			if state.hasFailure {
+				stored = sanitizeMessage(raw, state.failureDocs, state.reportDocs, state.orderedDocs)
 			}
 
 			blob, err = store.PutBlob(ctx, tx, stored)
@@ -312,8 +315,14 @@ func parseMessage(
 ) error {
 	ext := newExtraction(nil)
 	ext.accept = func(doc document) error {
-		if doc.class == report.ClassFailure {
+		switch doc.class {
+		case report.ClassFailure:
 			state.failureDocs = append(state.failureDocs, doc)
+			state.orderedDocs = append(state.orderedDocs, doc)
+		case report.ClassAggregate, report.ClassTLS:
+			state.reportDocs = append(state.reportDocs, doc)
+			state.orderedDocs = append(state.orderedDocs, doc)
+		default:
 		}
 
 		return state.storeDocument(ctx, tx, ext, doc)
@@ -324,6 +333,7 @@ func parseMessage(
 		return err
 	}
 
+	state.hasFailure = ext.hasFailure || len(state.failureDocs) > 0
 	state.result.Class = ext.class
 	state.result.Reports = state.aggregateRows + state.tlsRows
 
