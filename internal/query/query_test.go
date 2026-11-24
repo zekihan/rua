@@ -881,3 +881,21 @@ func TestPolicyChangesIgnoreLaggingReportersAndDefaults(t *testing.T) {
 	eq(t, changes[1].ReportID, int64(3))
 	eqSlice(t, changes[1].Fields, []string{"p", "sp", "np"})
 }
+
+func TestParseFilterNormalizesDomainAndBoundsRange(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+
+	filter, err := fx.svc.ParseFilter(url.Values{"domain": {" Example.COM "}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eq(t, filter.Domain, "example.com")
+
+	_, err = fx.svc.ParseFilter(url.Values{"from": {"0001-01-01"}, "to": {"9999-12-31"}})
+	if !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("huge range: %v", err)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -83,13 +84,26 @@ type Filter struct {
 }
 
 // Service answers the /api queries.
+// The maxRangeDays limit bounds the span of an aggregating request (ten years).
+const maxRangeDays = 3660
+
 type Service struct {
-	deps Deps
+	// Label sets written by the last CollectMetrics, so series that
+	// disappeared are reset to zero.
+	gauges   map[gaugeKey]bool
+	deps     Deps
+	gaugesMu sync.Mutex
+}
+
+type gaugeKey struct {
+	metric string
+	first  string
+	second string
 }
 
 // New returns a Service.
 func New(deps Deps) *Service {
-	return &Service{deps: deps}
+	return &Service{deps: deps, gauges: map[gaugeKey]bool{}, gaugesMu: sync.Mutex{}}
 }
 
 func badRequest(format string, args ...any) error {
@@ -137,6 +151,10 @@ func (svc *Service) ParseFilter(values url.Values) (Filter, error) {
 		return Filter{}, badRequest("from %q is after to %q", fromStr, toStr)
 	}
 
+	if fromDate.AddDate(0, 0, maxRangeDays).Before(toDate) {
+		return Filter{}, badRequest("range longer than %d days", maxRangeDays)
+	}
+
 	kind := values.Get("kind")
 	if kind != "" && kind != kindAggregate && kind != kindTLS {
 		return Filter{}, badRequest("invalid kind %q", kind)
@@ -149,7 +167,7 @@ func (svc *Service) ParseFilter(values url.Values) (Filter, error) {
 
 	filter := Filter{
 		TZ:          loc,
-		Domain:      values.Get("domain"),
+		Domain:      strings.ToLower(strings.TrimSpace(values.Get("domain"))),
 		From:        fromStr,
 		To:          toStr,
 		Reporter:    values.Get("reporter"),

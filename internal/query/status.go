@@ -427,6 +427,11 @@ func (svc *Service) CollectMetrics(ctx context.Context, metrics *telemetry.Metri
 		return nil
 	}
 
+	svc.gaugesMu.Lock()
+	defer svc.gaugesMu.Unlock()
+
+	seen := map[gaugeKey]bool{}
+
 	err := svc.deps.Store.Read(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
 		var classRows []struct {
 			Class  string `db:"class"`
@@ -441,11 +446,9 @@ func (svc *Service) CollectMetrics(ctx context.Context, metrics *telemetry.Metri
 		}
 
 		for index := range classRows {
-			metrics.Messages(
-				classRows[index].Class,
-				classRows[index].Status,
-				classRows[index].Count,
-			)
+			row := &classRows[index]
+			metrics.Messages(row.Class, row.Status, row.Count)
+			seen[gaugeKey{metric: "messages", first: row.Class, second: row.Status}] = true
 		}
 
 		rng := &resolvedRange{
@@ -483,6 +486,7 @@ func (svc *Service) CollectMetrics(ctx context.Context, metrics *telemetry.Metri
 
 		for _, key := range keys {
 			metrics.Records(key.domain, key.verdict, totals[key])
+			seen[gaugeKey{metric: "records", first: key.domain, second: key.verdict}] = true
 		}
 
 		mailboxes, err := svc.loadMailboxes(ctx, tx)
@@ -517,5 +521,24 @@ func (svc *Service) CollectMetrics(ctx context.Context, metrics *telemetry.Metri
 		return fmt.Errorf("collect metrics: %w", err)
 	}
 
+	svc.resetVanished(metrics, seen)
+
 	return nil
+}
+
+// resetVanished zeroes the gauges set last time but not this time.
+func (svc *Service) resetVanished(metrics *telemetry.Metrics, seen map[gaugeKey]bool) {
+	for key := range svc.gauges {
+		if seen[key] {
+			continue
+		}
+
+		if key.metric == "messages" {
+			metrics.Messages(key.first, key.second, 0)
+		} else {
+			metrics.Records(key.first, key.second, 0)
+		}
+	}
+
+	svc.gauges = seen
 }
