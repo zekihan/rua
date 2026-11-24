@@ -38,7 +38,6 @@ type messageWrite struct {
 	tlsRows         int
 	failuresWritten int
 	recordsAdded    bool
-	pruned          bool
 }
 
 // Ingest stores an RFC 5322 message or a bare document. Parse failures are
@@ -276,13 +275,6 @@ type reportRow struct {
 func (state *messageWrite) insertReport(
 	ctx context.Context, tx *sqlx.Tx, row *reportRow,
 ) (int64, bool, error) {
-	if state.pruned {
-		deleted, err := prunedReport(ctx, tx, state.result.MessageID, row)
-		if err != nil || deleted {
-			return 0, false, err
-		}
-	}
-
 	var first struct {
 		Blob []byte `db:"blob"`
 		ID   int64  `db:"id"`

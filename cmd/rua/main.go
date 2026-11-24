@@ -101,7 +101,8 @@ func run(args []string, stdout io.Writer) error {
 				return imapsrc.ErrDisabled
 			}
 
-			err := imapsrc.New(imapConfig(cfg), st, newPipeline(st, nil, nil), nil).FetchOnce(ctx)
+			err := imapsrc.New(imapConfig(cfg), st, newPipeline(st, cfg, nil, nil), nil).
+				FetchOnce(ctx)
 			if err != nil {
 				return fmt.Errorf("fetch: %w", err)
 			}
@@ -110,7 +111,7 @@ func run(args []string, stdout io.Writer) error {
 		})
 	case "import":
 		return withStore(ctx, cfg.DBPath, func(st *store.Store) error {
-			summary, err := newPipeline(st, nil, nil).Import(ctx, args)
+			summary, err := newPipeline(st, cfg, nil, nil).Import(ctx, args)
 			fmt.Fprintf(stdout, "files %d, messages %d, already stored %d, failed %d\n",
 				summary.Files, summary.Messages, summary.Known, summary.Failed)
 
@@ -122,7 +123,7 @@ func run(args []string, stdout io.Writer) error {
 		})
 	case "reparse":
 		return withStore(ctx, cfg.DBPath, func(st *store.Store) error {
-			n, err := newPipeline(st, nil, nil).Reparse(ctx)
+			n, err := newPipeline(st, cfg, nil, nil).Reparse(ctx)
 			fmt.Fprintf(stdout, "reparsed %d messages\n", n)
 
 			if err != nil {
@@ -173,8 +174,15 @@ func withStore(ctx context.Context, path string, fn func(*store.Store) error) er
 	return errors.Join(fn(st), st.Close())
 }
 
-func newPipeline(st *store.Store, telem *telemetry.Metrics, newIPs func()) *ingest.Pipeline {
-	return ingest.New(st, ingest.Options{Metrics: telem, Now: time.Now, NewIPs: newIPs})
+func newPipeline(
+	st *store.Store,
+	cfg *config.Config,
+	telem *telemetry.Metrics,
+	newIPs func(),
+) *ingest.Pipeline {
+	return ingest.New(st, ingest.Options{
+		Metrics: telem, Now: time.Now, NewIPs: newIPs, RetentionDays: cfg.RetentionDays,
+	})
 }
 
 func imapConfig(cfg *config.Config) imapsrc.Config {
@@ -208,7 +216,7 @@ func serve(ctx context.Context, cfg *config.Config) error {
 	worker := enrich.New(st, enrich.Options{
 		Enabled: cfg.Lookups, Resolver: nil, Metrics: telem, Now: time.Now,
 	})
-	pipeline := newPipeline(st, telem, worker.Notify)
+	pipeline := newPipeline(st, cfg, telem, worker.Notify)
 	fetcher := imapsrc.New(imapConfig(cfg), st, pipeline, telem)
 
 	background(ctx, "Source rules reload", loader.Run)
@@ -268,7 +276,7 @@ func serveDemo(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("demo sources: %w", err)
 	}
 
-	pipeline := newPipeline(st, nil, nil)
+	pipeline := newPipeline(st, cfg, nil, nil)
 
 	err = demo.Generate(ctx, pipeline, time.Now())
 	if err != nil {

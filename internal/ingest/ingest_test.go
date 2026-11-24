@@ -586,7 +586,9 @@ func TestPruneAndReplay(t *testing.T) {
 	fakeParsers(t)
 	pipe, st := fixtureStore(
 		t,
-		Options{Now: func() time.Time { return testNow }, Metrics: nil, NewIPs: nil},
+		Options{
+			Now: func() time.Time { return testNow }, Metrics: nil, NewIPs: nil, RetentionDays: 1,
+		},
 	)
 	ran, err := pipe.ReparseIfNeeded(t.Context())
 	mustSucceed(t, err)
@@ -648,6 +650,6 @@ func TestPruneAndReplay(t *testing.T) {
 	assertEqual(
 		t,
 		scalar[string](t, st, "SELECT status FROM messages WHERE id=?", mixed.MessageID),
-		StatusPruned,
+		StatusOK,
 	)
 }

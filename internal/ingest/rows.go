@@ -207,13 +207,6 @@ func insertTLSPolicy(
 func (state *messageWrite) storeFailure(
 	ctx context.Context, tx *sqlx.Tx, value *report.Failure,
 ) error {
-	if state.pruned {
-		deleted, err := prunedFailure(ctx, tx, state.result.MessageID, value.Arrival)
-		if err != nil || deleted {
-			return err
-		}
-	}
-
 	_, err := tx.ExecContext(ctx, `INSERT INTO failure_reports
 		(message, arrival, domain, source_ip, auth_failure, orig_from, orig_to, orig_subject)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,

@@ -27,8 +27,8 @@ const (
 	StatusPartial = "partial"
 	StatusError   = "error"
 	StatusSkipped = "skipped"
-	// StatusPruned marks messages affected by retention. Fully pruned messages
-	// retain their digest but no longer reference a raw blob.
+	// StatusPruned marks a message whose reports all expired under
+	// retention. It keeps its digest, so it is not refetched, but no blob.
 	StatusPruned = "pruned"
 )
 
@@ -56,6 +56,9 @@ type Options struct {
 	// NewIPs is called (without blocking) after a commit that added records,
 	// so enrichment can pick up new source IPs. May be nil.
 	NewIPs func()
+	// RetentionDays, when positive, is reapplied after every reparse so
+	// reports of partly pruned messages do not come back.
+	RetentionDays int
 }
 
 // Pipeline is the single write path for reports.

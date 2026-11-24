@@ -44,7 +44,7 @@ func (pipe *Pipeline) ReparseIfNeeded(ctx context.Context) (bool, error) {
 		pipe.reparsing.Add(1)
 
 		ran = true
-		_, recordsAdded, err = rebuild(ctx, tx)
+		_, recordsAdded, err = pipe.rebuild(ctx, tx)
 
 		return err
 	})
@@ -75,7 +75,7 @@ func (pipe *Pipeline) Reparse(ctx context.Context) (int, error) {
 	err := pipe.store.Write(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
 		var err error
 
-		count, recordsAdded, err = rebuild(ctx, tx)
+		count, recordsAdded, err = pipe.rebuild(ctx, tx)
 
 		return err
 	})
@@ -88,7 +88,7 @@ func (pipe *Pipeline) Reparse(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-func rebuild(ctx context.Context, tx *sqlx.Tx) (int, bool, error) {
+func (pipe *Pipeline) rebuild(ctx context.Context, tx *sqlx.Tx) (int, bool, error) {
 	_, err := tx.ExecContext(ctx, `DELETE FROM reports; DELETE FROM failure_reports;`)
 	if err != nil {
 		return 0, false, fmt.Errorf("clear parsed reports: %w", err)
@@ -102,12 +102,11 @@ func rebuild(ctx context.Context, tx *sqlx.Tx) (int, bool, error) {
 
 	for {
 		var row struct {
-			Status string `db:"status"`
-			Blob   []byte `db:"blob"`
-			ID     int64  `db:"id"`
+			Blob []byte `db:"blob"`
+			ID   int64  `db:"id"`
 		}
 
-		err = tx.GetContext(ctx, &row, `SELECT id, blob, status FROM messages
+		err = tx.GetContext(ctx, &row, `SELECT id, blob FROM messages
 			WHERE id > ? AND blob IS NOT NULL ORDER BY id LIMIT 1`, lastID)
 		if errors.Is(err, sql.ErrNoRows) {
 			break
@@ -119,13 +118,20 @@ func rebuild(ctx context.Context, tx *sqlx.Tx) (int, bool, error) {
 
 		lastID = row.ID
 
-		added, parseErr := rebuildMessage(ctx, tx, row.ID, row.Blob, row.Status == StatusPruned)
+		added, parseErr := rebuildMessage(ctx, tx, row.ID, row.Blob)
 		if parseErr != nil {
 			return 0, false, parseErr
 		}
 
 		count++
 		recordsAdded = recordsAdded || added
+	}
+
+	if pipe.opts.RetentionDays > 0 {
+		_, err = applyRetention(ctx, tx, pipe.cutoff(pipe.opts.RetentionDays))
+		if err != nil {
+			return 0, false, err
+		}
 	}
 
 	err = deleteUnusedBlobs(ctx, tx)
@@ -137,7 +143,7 @@ func rebuild(ctx context.Context, tx *sqlx.Tx) (int, bool, error) {
 }
 
 func rebuildMessage(
-	ctx context.Context, tx *sqlx.Tx, id int64, digest []byte, pruned bool,
+	ctx context.Context, tx *sqlx.Tx, id int64, digest []byte,
 ) (bool, error) {
 	raw, err := store.GetBlob(ctx, tx, digest)
 	if err != nil {
@@ -147,26 +153,24 @@ func rebuildMessage(
 	var state messageWrite
 
 	state.result.MessageID = id
-	state.pruned = pruned
 
 	err = state.parse(ctx, tx, raw)
 	if err != nil {
 		return false, err
 	}
 
-	status := state.result.Status
-	if pruned {
-		status = StatusPruned
-	}
-
 	_, err = tx.ExecContext(ctx, `UPDATE messages
 		SET class = ?, status = ?, error = ?, parser_version = ? WHERE id = ?`,
-		state.result.Class, status, state.messageError, report.ParserVersion, id)
+		state.result.Class, state.result.Status, state.messageError, report.ParserVersion, id)
 	if err != nil {
 		return false, fmt.Errorf("update reparsed message: %w", err)
 	}
 
 	return state.recordsAdded, nil
+}
+
+func (pipe *Pipeline) cutoff(days int) int64 {
+	return pipe.opts.Now().UTC().AddDate(0, 0, -days).Unix()
 }
 
 func setParserVersion(ctx context.Context, tx *sqlx.Tx) error {
@@ -200,7 +204,7 @@ func (pipe *Pipeline) Prune(ctx context.Context, days int) (int, error) {
 		return 0, nil
 	}
 
-	cutoff := pipe.opts.Now().UTC().AddDate(0, 0, -days).Unix()
+	cutoff := pipe.cutoff(days)
 
 	var count int64
 
@@ -218,103 +222,58 @@ func (pipe *Pipeline) Prune(ctx context.Context, days int) (int, error) {
 	return int(count), nil
 }
 
-const (
-	prunePrefix    = "ingest.prune/"
-	expiredReports = `SELECT message, blob, domain FROM reports WHERE end < ?
-		OR duplicate_of IN (SELECT id FROM reports WHERE duplicate_of IS NULL AND end < ?)`
-)
-
+// applyRetention deletes reports whose window ended before cutoff (with
+// their duplicates) and failure reports that arrived before it. A message
+// left without any report loses its raw blob and becomes pruned, so a
+// reparse cannot bring its reports back; a message with surviving reports
+// keeps its blob, and its expired reports are dropped again by the
+// retention pass that follows every reparse.
 func applyRetention(ctx context.Context, tx *sqlx.Tx, cutoff int64) (int64, error) {
-	// Mixed messages keep their raw blob so surviving reports can be reparsed.
-	// Persist which document/domain pairs were deleted, including cascading
-	// duplicates whose own reported window may still be within retention.
-	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO meta (key, value)
-		SELECT '`+prunePrefix+`' || message || '/r/' || hex(blob) || '/' || domain, '1'
-		FROM (`+expiredReports+`)
-		UNION ALL
-		SELECT '`+prunePrefix+`' || message || '/f/' || arrival, '1'
-		FROM failure_reports WHERE arrival < ?`, cutoff, cutoff, cutoff)
+	var messages []int64
+
+	err := tx.SelectContext(ctx, &messages, `
+		SELECT message FROM reports WHERE end < ?
+		UNION SELECT message FROM reports
+			WHERE duplicate_of IN (SELECT id FROM reports WHERE end < ?)
+		UNION SELECT message FROM failure_reports WHERE arrival < ?`, cutoff, cutoff, cutoff)
 	if err != nil {
-		return 0, fmt.Errorf("mark expired reports: %w", err)
+		return 0, fmt.Errorf("find expired reports: %w", err)
+	}
+
+	if len(messages) == 0 {
+		return 0, nil
 	}
 
 	var count int64
 
-	err = tx.GetContext(ctx, &count, `SELECT (SELECT COUNT(*) FROM (`+expiredReports+`))
-		+ (SELECT COUNT(*) FROM failure_reports WHERE arrival < ?)`, cutoff, cutoff, cutoff)
+	err = tx.GetContext(ctx, &count, `SELECT
+		(SELECT count(*) FROM reports WHERE end < ?
+			OR duplicate_of IN (SELECT id FROM reports WHERE end < ?))
+		+ (SELECT count(*) FROM failure_reports WHERE arrival < ?)`, cutoff, cutoff, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("count expired reports: %w", err)
 	}
 
-	if count == 0 {
-		return 0, nil
-	}
-
-	_, err = tx.ExecContext(ctx, `UPDATE messages SET status = ?
-		WHERE id IN (SELECT message FROM (`+expiredReports+`)
-		             UNION SELECT message FROM failure_reports WHERE arrival < ?)`,
-		StatusPruned, cutoff, cutoff, cutoff)
+	_, err = tx.ExecContext(ctx, `DELETE FROM reports WHERE end < ?`, cutoff)
 	if err != nil {
-		return 0, fmt.Errorf("mark pruned messages: %w", err)
-	}
-
-	err = deleteExpiredRows(ctx, tx, cutoff)
-	if err != nil {
-		return 0, err
-	}
-
-	return count, deleteUnusedBlobs(ctx, tx)
-}
-
-func deleteExpiredRows(ctx context.Context, tx *sqlx.Tx, cutoff int64) error {
-	_, err := tx.ExecContext(ctx, `DELETE FROM reports WHERE end < ?`, cutoff)
-	if err != nil {
-		return fmt.Errorf("delete expired reports: %w", err)
+		return 0, fmt.Errorf("delete expired reports: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `DELETE FROM failure_reports WHERE arrival < ?`, cutoff)
 	if err != nil {
-		return fmt.Errorf("delete expired failure reports: %w", err)
+		return 0, fmt.Errorf("delete expired failure reports: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, `UPDATE messages SET blob = NULL
-		WHERE status = ? AND blob IS NOT NULL
-		  AND id NOT IN (SELECT message FROM reports)
-		  AND id NOT IN (SELECT message FROM failure_reports)`, StatusPruned)
-	if err != nil {
-		return fmt.Errorf("unlink fully pruned messages: %w", err)
+	for _, id := range messages {
+		_, err = tx.ExecContext(ctx, `UPDATE messages SET blob = NULL, status = ?
+			WHERE id = ?
+			  AND NOT EXISTS (SELECT 1 FROM reports WHERE message = ?)
+			  AND NOT EXISTS (SELECT 1 FROM failure_reports WHERE message = ?)`,
+			StatusPruned, id, id, id)
+		if err != nil {
+			return 0, fmt.Errorf("unlink pruned message: %w", err)
+		}
 	}
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM meta
-		WHERE key GLOB '`+prunePrefix+`*' AND NOT EXISTS (
-			SELECT 1 FROM messages WHERE blob IS NOT NULL
-			  AND id = CAST(substr(meta.key, length('`+prunePrefix+`') + 1) AS INTEGER)
-		)`)
-	if err != nil {
-		return fmt.Errorf("delete markers for fully pruned messages: %w", err)
-	}
-
-	return nil
-}
-
-func prunedReport(ctx context.Context, tx *sqlx.Tx, id int64, row *reportRow) (bool, error) {
-	key := fmt.Sprintf("%s%d/r/%X/%s", prunePrefix, id, row.digest, row.domain)
-
-	_, exists, err := store.Meta(ctx, tx, key)
-	if err != nil {
-		return false, fmt.Errorf("read retention marker: %w", err)
-	}
-
-	return exists, nil
-}
-
-func prunedFailure(ctx context.Context, tx *sqlx.Tx, id, arrival int64) (bool, error) {
-	key := fmt.Sprintf("%s%d/f/%d", prunePrefix, id, arrival)
-
-	_, exists, err := store.Meta(ctx, tx, key)
-	if err != nil {
-		return false, fmt.Errorf("read retention marker: %w", err)
-	}
-
-	return exists, nil
+	return count, deleteUnusedBlobs(ctx, tx)
 }
