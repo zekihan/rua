@@ -8,6 +8,8 @@ import {
   maxValue,
   countScale,
   tickIndices,
+  visibleBarHeight,
+  dayLabel,
 } from "../src/chart-helpers.ts";
 
 test("chart helpers", () => {
@@ -43,4 +45,28 @@ test("date ticks include the endpoints without exceeding the label budget", () =
   assert.deepEqual(tickIndices(1, 5), [0]);
   assert.deepEqual(tickIndices(4, 5), [0, 1, 2, 3]);
   assert.deepEqual(tickIndices(365, 5), [0, 91, 182, 273, 364]);
+});
+
+test("small non-zero bars stay visible", () => {
+  assert.equal(visibleBarHeight(0, 1000, 200), 0);
+  assert.equal(visibleBarHeight(1, 1000, 200), 2);
+  assert.equal(visibleBarHeight(500, 1000, 200), 100);
+  assert.equal(visibleBarHeight(1, 0, 200), 0);
+});
+
+test("day labels name the date and every series", () => {
+  const series = [
+    { key: "pass", label: "Pass" },
+    { key: "fail", label: "Fail" },
+  ];
+  assert.equal(
+    dayLabel("2026-11-20", series, { pass: 1200, fail: 3 }, (n) =>
+      n.toLocaleString("en-GB"),
+    ),
+    "2026-11-20: Pass 1,200, Fail 3",
+  );
+  assert.equal(
+    dayLabel("2026-11-21", series, {}),
+    "2026-11-21: Pass 0, Fail 0",
+  );
 });

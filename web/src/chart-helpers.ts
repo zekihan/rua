@@ -27,6 +27,24 @@ export function barHeight(value: number, max: number, height: number): number {
   if (!max || !value) return 0;
   return (value / max) * height;
 }
+/** Bar height that keeps any non-zero value visible as at least `min` px. */
+export function visibleBarHeight(
+  value: number,
+  max: number,
+  height: number,
+  min = 2,
+): number {
+  const size = barHeight(value, max, height);
+  return size > 0 ? Math.max(size, min) : 0;
+}
+export function dayLabel(
+  date: string,
+  series: ReadonlyArray<{ key: string; label: string }>,
+  counts: Record<string, number>,
+  format: (n: number) => string = String,
+): string {
+  return `${date}: ${series.map(({ key, label }) => `${label} ${format(counts[key] ?? 0)}`).join(", ")}`;
+}
 export function donutArcs(values: { key: string; value: number }[]): {
   key: string;
   value: number;
