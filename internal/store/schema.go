@@ -45,7 +45,8 @@ CREATE TABLE blobs (
 
 CREATE TABLE messages (
 	id             INTEGER PRIMARY KEY,
-	-- SHA-256 of the raw message; of the header bytes for skipped messages
+	-- SHA-256 of the raw message; for skipped messages of the header bytes,
+	-- mailbox, UIDVALIDITY and UID
 	sha256         BLOB NOT NULL UNIQUE,
 	-- NULL for skipped (oversized) messages
 	blob           BLOB REFERENCES blobs (sha256),
