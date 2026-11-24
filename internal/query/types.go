@@ -412,6 +412,11 @@ type FailureReport struct {
 	ArrivalAt   int64  `json:"arrivalAt"`
 }
 
+// FetchResponse is POST /api/fetch.
+type FetchResponse struct {
+	Status string `json:"status"`
+}
+
 // ErrorBody is the error response. Errors are returned as {"error": {"code": "...", "message":
 // "..."}} with
 // a 4xx/5xx status. Codes: bad_request, not_found, fetch_running,
