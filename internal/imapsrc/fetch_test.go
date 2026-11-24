@@ -259,6 +259,54 @@ func TestUIDValidityReset(t *testing.T) {
 	built.assertReadOnly(t, "Reports")
 }
 
+func TestPendingBacklog(t *testing.T) {
+	t.Parallel()
+
+	built := newRig(t, []string{"Reports"})
+	built.create(t, "Reports")
+
+	// Before the first fetch the mailbox row the fetcher creates has no
+	// pending value yet.
+	err := built.fetcher.ensureMailbox(t.Context(), "Reports")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if row := built.mailbox(t, "Reports"); row.HasPending {
+		t.Fatalf("pending before first fetch = %+v", row)
+	}
+
+	when := time.Unix(1_700_001_000, 0).UTC()
+	built.deliver(t, "Reports", "one", "a", when)
+	built.deliver(t, "Reports", "two", "b", when)
+	built.deliver(t, "Reports", "three", "c", when)
+
+	built.sink.failOn = 2
+	built.sink.failErr = errSinkFailed
+
+	err = built.fetch(t)
+	if err == nil {
+		t.Fatal("expected sink error")
+	}
+
+	// One message handed off, two still pending.
+	if row := built.mailbox(t, "Reports"); !row.HasPending || row.Pending != 2 {
+		t.Fatalf("pending after failed fetch = %+v", row)
+	}
+
+	built.sink.failOn = 0
+	built.sink.failErr = nil
+
+	err = built.fetch(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if row := built.mailbox(t, "Reports"); !row.HasPending || row.Pending != 0 {
+		t.Fatalf("pending after successful fetch = %+v", row)
+	}
+}
+
 func TestOversizedSkip(t *testing.T) {
 	t.Parallel()
 

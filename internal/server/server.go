@@ -43,6 +43,7 @@ func (srv *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", srv.handleHealth)
 	mux.HandleFunc("GET /api/domains", srv.handleDomains)
 	mux.HandleFunc("GET /api/overview", srv.handleOverview)
+	mux.HandleFunc("GET /api/reporters", srv.handleReporters)
 	mux.HandleFunc("GET /api/sources", srv.handleSources)
 	mux.HandleFunc("GET /api/sources/{key}", srv.handleSource)
 	mux.HandleFunc("GET /api/reports", srv.handleReports)

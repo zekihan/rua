@@ -195,4 +195,7 @@ CREATE TABLE failure_reports (
 
 CREATE INDEX failure_reports_message ON failure_reports (message);
 `,
+	`
+ALTER TABLE mailboxes ADD COLUMN pending INTEGER;
+`,
 }

@@ -351,7 +351,7 @@ type Status struct {
 	ParserVersion     int             `json:"parserVersion"`
 	EnrichQueue       int             `json:"enrichQueue"`
 	// Stale is true when IMAP is enabled and the last successful fetch of
-	// any mailbox is missing or older than StaleAfterSeconds.
+	// any configured mailbox is missing or older than StaleAfterSeconds.
 	Stale     bool `json:"stale"`
 	Reparsing bool `json:"reparsing"`
 }

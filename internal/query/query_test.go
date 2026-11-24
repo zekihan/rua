@@ -147,6 +147,7 @@ func newFixture(t *testing.T, set *sources.Set) *fixture {
 	deps.Now = func() time.Time { return testNow }
 	deps.StaleAfter = 3 * time.Hour
 	deps.IMAPEnabled = true
+	deps.Mailboxes = []string{"INBOX"}
 
 	return &fixture{svc: New(deps), st: st}
 }
@@ -617,6 +618,110 @@ func TestDSTBucketingBerlinAndMidnight(t *testing.T) {
 	eq(t, midnight.Days[1].Messages, int64(4))
 }
 
+func TestMidnightDSTDayBuckets(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		tz    string
+		dates []string
+	}{
+		{
+			name: "sao paulo", tz: "America/Sao_Paulo",
+			dates: []string{"2018-11-03", "2018-11-04", "2018-11-05"},
+		},
+		{
+			name: "havana", tz: "America/Havana",
+			dates: []string{"2019-03-09", "2019-03-10", "2019-03-11"},
+		},
+		{
+			name: "beirut", tz: "Asia/Beirut",
+			dates: []string{"2019-03-30", "2019-03-31", "2019-04-01"},
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			loc, err := time.LoadLocation(testCase.tz)
+			if err != nil {
+				t.Skipf("tzdata unavailable: %v", err)
+			}
+
+			fx := newFixture(t, sources.Empty())
+			counts := []int64{3, 5, 7}
+
+			for index, date := range testCase.dates {
+				parsed, parseErr := time.Parse(dateLayout, date)
+				if parseErr != nil {
+					t.Fatal(parseErr)
+				}
+
+				noon := time.Date(
+					parsed.Year(), parsed.Month(), parsed.Day(), 12, 0, 0, 0, loc,
+				).Unix()
+				fx.ingest(t, aggregateXML("Google", "mid-"+date, "example.com",
+					noon-12*3600, noon+12*3600, "reject", 100,
+					"192.0.2.1", counts[index], "pass", "fail", "none",
+					"example.com", "example.com", "pass", "s1", ""))
+			}
+
+			query := "from=" + testCase.dates[0] + "&to=" + testCase.dates[2] +
+				"&tz=" + testCase.tz
+			overview := overviewFor(t, fx, query)
+			eq(t, len(overview.Days), 3)
+
+			gotDates := []string{
+				overview.Days[0].Date,
+				overview.Days[1].Date,
+				overview.Days[2].Date,
+			}
+			eqSlice(t, gotDates, testCase.dates)
+
+			for index := range counts {
+				eq(t, overview.Days[index].Messages, counts[index])
+			}
+
+			single := overviewFor(t, fx, "from="+testCase.dates[1]+"&to="+testCase.dates[1]+
+				"&tz="+testCase.tz)
+			eq(t, len(single.Days), 1)
+			eq(t, single.Days[0].Date, testCase.dates[1])
+			eq(t, single.Days[0].Messages, counts[1])
+		})
+	}
+}
+
+func TestDayStartMidnightDST(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		tz   string
+		date string
+		want string
+	}{
+		{tz: "America/Sao_Paulo", date: "2018-11-04", want: "2018-11-04 01:00"},
+		{tz: "America/Havana", date: "2019-03-10", want: "2019-03-10 01:00"},
+		{tz: "Asia/Beirut", date: "2019-03-31", want: "2019-03-31 01:00"},
+		{tz: "America/Sao_Paulo", date: "2018-11-03", want: "2018-11-03 00:00"},
+	}
+
+	for _, testCase := range cases {
+		loc, err := time.LoadLocation(testCase.tz)
+		if err != nil {
+			t.Skipf("tzdata unavailable: %v", err)
+		}
+
+		civil, err := parseCivilDate(testCase.date)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		got := time.Unix(civil.dayStart(loc), 0).In(loc).Format("2006-01-02 15:04")
+		eq(t, got, testCase.want)
+	}
+}
+
 func reportsFor(t *testing.T, fx *fixture, rawQuery string) ReportsResponse {
 	t.Helper()
 
@@ -666,6 +771,82 @@ func TestReportsPagination(t *testing.T) {
 
 	_, badErr := fx.svc.Reports(t.Context(), fx.filter(t, "cursor=not-base64!!"))
 	_ = badErr
+}
+
+func collectReportIDs(t *testing.T, fx *fixture, baseQuery string, pages int) []int64 {
+	t.Helper()
+
+	ids := []int64{}
+	cursor := ""
+
+	for range pages {
+		query := baseQuery
+		if cursor != "" {
+			query += "&cursor=" + url.QueryEscape(cursor)
+		}
+
+		page := reportsFor(t, fx, query)
+		for index := range page.Reports {
+			ids = append(ids, page.Reports[index].ID)
+		}
+
+		if page.NextCursor == "" {
+			break
+		}
+
+		cursor = page.NextCursor
+	}
+
+	return ids
+}
+
+func TestReportsPaginationWalk(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+
+	for index := range 6 {
+		day := 9 + index
+
+		ip := "192.0.2.1"
+		if index%2 == 1 {
+			ip = "192.0.2.2"
+		}
+
+		fx.ingest(t, aggregateXML("Google", fmt.Sprintf("page-%d", index), "example.com",
+			unixTime(2025, time.June, day, 0), unixTime(2025, time.June, day+2, 0),
+			"reject", 100, ip, 2, "pass", "fail", "none",
+			"example.com", "example.com", "pass", "s1", ""))
+	}
+
+	full := reportsFor(t, fx, "from=2025-06-01&to=2025-06-30&tz=UTC&limit=50")
+	eq(t, len(full.Reports), 6)
+
+	want := make([]int64, 0, len(full.Reports))
+	for index := range full.Reports {
+		want = append(want, full.Reports[index].ID)
+	}
+
+	got := collectReportIDs(t, fx, "from=2025-06-01&to=2025-06-30&tz=UTC&limit=2", 10)
+	eqSlice(t, got, want)
+
+	// Source-filtered pages collect only matching reports, in order.
+	filtered := collectReportIDs(
+		t, fx, "from=2025-06-01&to=2025-06-30&tz=UTC&limit=1&source=ip%3A192.0.2.2", 10,
+	)
+	eq(t, len(filtered), 3)
+
+	for _, id := range filtered {
+		found := false
+
+		for _, wantID := range want {
+			if id == wantID {
+				found = true
+			}
+		}
+
+		eq(t, found, true)
+	}
 }
 
 func TestBadCursor(t *testing.T) {
@@ -781,6 +962,43 @@ func TestTLSViewsAndDomains(t *testing.T) {
 	eq(t, domains.Domains[0].TLSReports, int64(1))
 }
 
+func TestNewSourcesFirstSeen(t *testing.T) {
+	t.Parallel()
+
+	set, err := sources.Parse(
+		[]byte(
+			"- name: Mail provider\n  expected: true\n  match:\n    dkim_domains: [example.com]\n",
+		),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fx := newFixture(t, set)
+	// An established IP reporting before and inside the range.
+	fx.ingest(t, aggregateXML("Google", "seen-old", "example.com",
+		unixTime(2025, time.May, 1, 0), unixTime(2025, time.May, 3, 0), "reject", 100,
+		"192.0.2.9", 2, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+	fx.ingest(t, aggregateXML("Google", "seen-again", "example.com",
+		unixTime(2025, time.June, 9, 0), unixTime(2025, time.June, 11, 0), "reject", 100,
+		"192.0.2.9", 2, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+	// A genuinely new IP first seen inside the range, with a failing
+	// record whose DKIM domain matches no rule.
+	fx.ingest(t, aggregateXML("Google", "seen-new", "example.com",
+		unixTime(2025, time.June, 9, 0), unixTime(2025, time.June, 11, 0), "reject", 100,
+		"192.0.2.10", 6, "fail", "fail", "reject", "example.com", "other.net", "pass", "s1", ""))
+
+	overview := overviewFor(t, fx, "from=2025-06-01&to=2025-06-15&tz=UTC")
+
+	// The established IP classifies as the expected rule source and was
+	// first seen in May, so only the new unknown IP is listed.
+	eq(t, len(overview.NewUnknown), 1)
+	eq(t, overview.NewUnknown[0].Key, "ip:192.0.2.10")
+	eq(t, overview.NewUnknown[0].FirstSeen, "2025-06-10")
+	eq(t, overview.NewUnknown[0].Messages, int64(6))
+	eq(t, len(overview.NewExpected), 0)
+}
+
 func TestQuietAndLongWindow(t *testing.T) {
 	t.Parallel()
 
@@ -844,6 +1062,137 @@ func TestStatusFreshAndMessageRaw(t *testing.T) {
 	eq(t, errors.Is(err, ErrNotFound), true)
 }
 
+func TestStatusStaleConfiguredOnly(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+	fresh := testNow.Add(-time.Hour).Unix()
+	old := testNow.Add(-10 * time.Hour).Unix()
+
+	fx.exec(
+		t,
+		`INSERT INTO mailboxes (name, uidvalidity, next_uid, last_success) VALUES ('INBOX', 1, 10, ?)`,
+		fresh,
+	)
+	fx.exec(
+		t,
+		`INSERT INTO mailboxes (name, uidvalidity, next_uid, last_success) VALUES ('Retired', 1, 10, ?)`,
+		old,
+	)
+
+	// The retired mailbox is listed but does not make the status stale.
+	status := statusFor(t, fx)
+	eq(t, status.Stale, false)
+	eq(t, len(status.Mailboxes), 2)
+	eq(t, status.Mailboxes[0].Name, "INBOX")
+	eq(t, status.Mailboxes[0].Configured, true)
+	eq(t, status.Mailboxes[1].Name, "Retired")
+	eq(t, status.Mailboxes[1].Configured, false)
+
+	// A configured mailbox with no row yet is stale and listed with nulls.
+	fx.svc.deps.Mailboxes = []string{"INBOX", "Reports"}
+
+	status = statusFor(t, fx)
+	eq(t, status.Stale, true)
+	eq(t, len(status.Mailboxes), 3)
+
+	var reports *MailboxStatus
+
+	for index := range status.Mailboxes {
+		if status.Mailboxes[index].Name == "Reports" {
+			reports = &status.Mailboxes[index]
+		}
+	}
+
+	eq(t, reports == nil, false)
+	eq(t, reports.Configured, true)
+	eq(t, reports.LastSuccessAt == nil, true)
+	eq(t, reports.Pending == nil, true)
+
+	// A configured row without a success is stale even beside a fresh one.
+
+	fx.exec(
+		t,
+		`INSERT INTO mailboxes (name, uidvalidity, next_uid) VALUES ('Reports', 1, 1)`,
+	)
+	eq(t, statusFor(t, fx).Stale, true)
+}
+
+func TestReporters(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+	fx.ingest(t, aggregateXML("Google", "rep-g1", "example.com",
+		unixTime(2025, time.June, 9, 0), unixTime(2025, time.June, 11, 0), "reject", 100,
+		"192.0.2.1", 10, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+	fx.ingest(t, aggregateXML("Google", "rep-g2", "example.com",
+		unixTime(2025, time.June, 11, 0), unixTime(2025, time.June, 13, 0), "reject", 100,
+		"192.0.2.1", 5, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+	fx.ingest(t, aggregateXML("Google", "rep-g3", "other.com",
+		unixTime(2025, time.June, 11, 0), unixTime(2025, time.June, 13, 0), "reject", 100,
+		"192.0.2.1", 3, "pass", "fail", "none", "other.com", "other.com", "pass", "s1", ""))
+	fx.ingest(t, aggregateXML("OldReporter", "rep-old", "example.com",
+		unixTime(2025, time.May, 1, 0), unixTime(2025, time.May, 2, 0), "reject", 100,
+		"192.0.2.1", 2, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+	fx.ingest(t, aggregateXML("RecentReporter", "rep-recent", "example.com",
+		unixTime(2025, time.June, 13, 0), unixTime(2025, time.June, 14, 0), "reject", 100,
+		"192.0.2.1", 4, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+
+	response, err := fx.svc.Reporters(
+		t.Context(), fx.filter(t, "from=2025-06-01&to=2025-06-15&tz=UTC"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eq(t, response.Range.From, "2025-06-01")
+	eq(t, len(response.Reporters), 3)
+
+	// Quiet first, then most recent last report.
+	eq(t, response.Reporters[0].Org, "OldReporter")
+	eq(t, response.Reporters[0].Quiet, true)
+	eq(t, response.Reporters[0].Reports, int64(0))
+	eq(t, response.Reporters[0].Messages, int64(0))
+	eq(t, response.Reporters[1].Org, "RecentReporter")
+	eq(t, response.Reporters[1].Quiet, false)
+	eq(t, response.Reporters[2].Org, "Google")
+	eq(t, response.Reporters[2].Reports, int64(3))
+	eq(t, response.Reporters[2].Messages, int64(18))
+	eq(t, response.Reporters[2].FirstReportAt, unixTime(2025, time.June, 11, 0))
+	eq(t, response.Reporters[2].LastReportAt, unixTime(2025, time.June, 13, 0))
+	eqSlice(t, response.Reporters[2].Domains, []string{"example.com", "other.com"})
+
+	filtered, err := fx.svc.Reporters(
+		t.Context(), fx.filter(t, "domain=example.com&from=2025-06-01&to=2025-06-15&tz=UTC"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eq(t, len(filtered.Reporters), 3)
+	eq(t, filtered.Reporters[2].Org, "Google")
+	eq(t, filtered.Reporters[2].Reports, int64(2))
+	eq(t, filtered.Reporters[2].Messages, int64(15))
+	eqSlice(t, filtered.Reporters[2].Domains, []string{"example.com"})
+}
+
+func TestStatusMailboxPending(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+	fx.exec(
+		t,
+		`INSERT INTO mailboxes (name, uidvalidity, next_uid, pending) VALUES ('INBOX', 1, 10, 7)`,
+	)
+
+	status := statusFor(t, fx)
+	eq(t, len(status.Mailboxes), 1)
+
+	if status.Mailboxes[0].Pending == nil || *status.Mailboxes[0].Pending != 7 {
+		t.Fatalf("pending = %v", status.Mailboxes[0].Pending)
+	}
+}
+
 func TestPolicyChangesIgnoreLaggingReportersAndDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -898,4 +1247,105 @@ func TestParseFilterNormalizesDomainAndBoundsRange(t *testing.T) {
 	if !errors.Is(err, ErrBadRequest) {
 		t.Fatalf("huge range: %v", err)
 	}
+}
+
+func seedBulkRecords(t *testing.T, fx *fixture, reportID int64, extra int) {
+	t.Helper()
+
+	err := fx.st.Write(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		var maxID int64
+
+		getErr := tx.GetContext(ctx, &maxID, `SELECT COALESCE(MAX(id), 0) FROM records`)
+		if getErr != nil {
+			return fmt.Errorf("max record id: %w", getErr)
+		}
+
+		const batch = 500
+
+		for done := 0; done < extra; done += batch {
+			batchCount := min(batch, extra-done)
+
+			var recSQL strings.Builder
+
+			recSQL.WriteString(`INSERT INTO records
+				(report, source_ip, count, disposition, dkim, spf, reasons,
+				 header_from, envelope_from, envelope_to) VALUES `)
+
+			var authSQL strings.Builder
+
+			authSQL.WriteString(`INSERT INTO auth_results
+				(record, method, domain, selector, scope, result) VALUES `)
+
+			recArgs := make([]any, 0, batchCount*10)
+			authArgs := make([]any, 0, batchCount*12)
+
+			for index := range batchCount {
+				if index > 0 {
+					recSQL.WriteString(",")
+					authSQL.WriteString(",")
+				}
+
+				recSQL.WriteString("(?, '192.0.2.1', 1, 'none', 'pass', 'fail', '[]'," +
+					" 'example.com', 'example.com', 'dest.example.net')")
+
+				recArgs = append(recArgs, reportID)
+
+				recordID := maxID + int64(done+index) + 1
+
+				authSQL.WriteString("(?, 'dkim', 'example.com', 's1', '', 'pass')," +
+					"(?, 'spf', 'example.com', '', '', 'fail')")
+
+				authArgs = append(authArgs, recordID, recordID)
+			}
+
+			_, recErr := tx.ExecContext(ctx, recSQL.String(), recArgs...)
+			if recErr != nil {
+				return fmt.Errorf("insert records: %w", recErr)
+			}
+
+			_, authErr := tx.ExecContext(ctx, authSQL.String(), authArgs...)
+			if authErr != nil {
+				return fmt.Errorf("insert auth results: %w", authErr)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLargeReport(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+	fx.ingest(t, aggregateXML("Google", "big-1", "example.com",
+		unixTime(2025, time.June, 9, 0), unixTime(2025, time.June, 11, 0), "reject", 100,
+		"192.0.2.1", 1, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+
+	list := reportsFor(t, fx, "from=2025-06-01&to=2025-06-15&tz=UTC")
+	eq(t, len(list.Reports), 1)
+
+	const totalRecords = 40_000
+
+	seedBulkRecords(t, fx, list.Reports[0].ID, totalRecords-1)
+
+	list = reportsFor(t, fx, "from=2025-06-01&to=2025-06-15&tz=UTC")
+	eq(t, len(list.Reports), 1)
+	eq(t, list.Reports[0].Messages, int64(totalRecords))
+
+	if list.Reports[0].PassRate == nil || *list.Reports[0].PassRate != 1 {
+		t.Fatalf("passRate = %v", list.Reports[0].PassRate)
+	}
+
+	detail, err := fx.svc.Report(
+		t.Context(), list.Reports[0].ID, fx.filter(t, "tz=UTC"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eq(t, len(detail.Records), totalRecords)
+	eq(t, len(detail.Records[0].Auth), 2)
 }

@@ -35,6 +35,8 @@ const (
 	topFailingLimit  = 10
 	cursorParts      = 2
 	midpointDivisor  = 2
+	dayStartWindow   = 48 * time.Hour
+	dayStartStep     = 24 * time.Hour
 	kindAggregate    = "dmarc-aggregate"
 	kindTLS          = "tls-report"
 	domainClause     = " AND domain = ?"
@@ -61,6 +63,9 @@ type Deps struct {
 	Reparsing   func() bool
 	EnrichQueue func() int
 	Now         func() time.Time
+	// Mailboxes are the configured IMAP mailbox names; only these count
+	// toward staleness.
+	Mailboxes   []string
 	StaleAfter  time.Duration
 	IMAPEnabled bool
 }
@@ -102,6 +107,8 @@ type gaugeKey struct {
 }
 
 // New returns a Service.
+//
+//nolint:gocritic // hugeParam: the exported constructor takes Deps by value.
 func New(deps Deps) *Service {
 	return &Service{deps: deps, gauges: map[gaugeKey]bool{}, gaugesMu: sync.Mutex{}}
 }
@@ -129,29 +136,29 @@ func (svc *Service) ParseFilter(values url.Values) (Filter, error) {
 
 	toStr := values.Get("to")
 	if toStr == "" {
-		toStr = svc.now().In(loc).Format(dateLayout)
+		toStr = civilFromTime(svc.now(), loc).String()
 	}
 
-	toDate, err := parseDate(toStr, loc)
+	toDate, err := parseCivilDate(toStr)
 	if err != nil {
 		return Filter{}, badRequest("invalid to date %q", toStr)
 	}
 
 	fromStr := values.Get("from")
 	if fromStr == "" {
-		fromStr = toDate.AddDate(0, 0, -(defaultRangeDays - 1)).Format(dateLayout)
+		fromStr = toDate.addDays(-(defaultRangeDays - 1)).String()
 	}
 
-	fromDate, err := parseDate(fromStr, loc)
+	fromDate, err := parseCivilDate(fromStr)
 	if err != nil {
 		return Filter{}, badRequest("invalid from date %q", fromStr)
 	}
 
-	if fromDate.After(toDate) {
+	if fromDate.after(toDate) {
 		return Filter{}, badRequest("from %q is after to %q", fromStr, toStr)
 	}
 
-	if fromDate.AddDate(0, 0, maxRangeDays).Before(toDate) {
+	if toDate.ordinal()-fromDate.ordinal() > maxRangeDays {
 		return Filter{}, badRequest("range longer than %d days", maxRangeDays)
 	}
 
@@ -176,8 +183,8 @@ func (svc *Service) ParseFilter(values url.Values) (Filter, error) {
 		Cursor:      values.Get("cursor"),
 		Limit:       limit,
 		UnknownOnly: values.Get("unknown") == "1",
-		FromUnix:    fromDate.Unix(),
-		ToUnix:      toDate.AddDate(0, 0, 1).Unix(),
+		FromUnix:    fromDate.dayStart(loc),
+		ToUnix:      toDate.addDays(1).dayStart(loc),
 	}
 
 	return filter, nil
@@ -221,20 +228,90 @@ func parseLimit(raw string) (int, error) {
 	return limit, nil
 }
 
-func parseDate(value string, loc *time.Location) (time.Time, error) {
-	parsed, err := time.ParseInLocation(dateLayout, value, loc)
+// A civilDate is a calendar date (year, month, day) with no clock time
+// and no zone. Day buckets are civil dates: iterating them directly
+// keeps a day whose local midnight does not exist (a DST transition at
+// 00:00) from shifting into its neighbor.
+type civilDate struct {
+	year  int
+	month time.Month
+	day   int
+}
+
+func parseCivilDate(value string) (civilDate, error) {
+	parsed, err := time.Parse(dateLayout, value)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("parse date: %w", err)
+		return civilDate{year: 0, month: 0, day: 0}, fmt.Errorf("parse date: %w", err)
 	}
 
 	if parsed.Format(dateLayout) != value {
-		return time.Time{}, fmt.Errorf("parse date: %w", errBadDate)
+		return civilDate{year: 0, month: 0, day: 0}, fmt.Errorf("parse date: %w", errBadDate)
 	}
 
-	return parsed, nil
+	return civilDate{year: parsed.Year(), month: parsed.Month(), day: parsed.Day()}, nil
 }
 
 var errBadDate = errors.New("invalid date")
+
+func civilFromTime(instant time.Time, loc *time.Location) civilDate {
+	local := instant.In(loc)
+
+	return civilDate{year: local.Year(), month: local.Month(), day: local.Day()}
+}
+
+func (date civilDate) String() string {
+	return time.Date(date.year, date.month, date.day, 0, 0, 0, 0, time.UTC).Format(dateLayout)
+}
+
+func (date civilDate) addDays(count int) civilDate {
+	shifted := time.Date(date.year, date.month, date.day, 0, 0, 0, 0, time.UTC).
+		AddDate(0, 0, count)
+
+	return civilDate{year: shifted.Year(), month: shifted.Month(), day: shifted.Day()}
+}
+
+func (date civilDate) ordinal() int64 {
+	return time.Date(date.year, date.month, date.day, 0, 0, 0, 0, time.UTC).Unix() / daySeconds
+}
+
+func (date civilDate) after(other civilDate) bool {
+	return date.ordinal() > other.ordinal()
+}
+
+// dayStart returns the unix time of the first instant of the civil date
+// in loc. When 00:00 does not exist (DST starts at midnight) time.Date
+// lands on a neighboring day, so search around it for the first
+// instant whose civil date is this one; a wholly skipped date resolves
+// to the start of the next existing date, leaving an empty bucket.
+func (date civilDate) dayStart(loc *time.Location) int64 {
+	base := time.Date(date.year, date.month, date.day, 0, 0, 0, 0, loc)
+	if civilFromTime(base, loc) == date {
+		return base.Unix()
+	}
+
+	target := date.ordinal()
+	low := base.Add(-dayStartWindow)
+	high := base.Add(dayStartWindow)
+
+	for civilFromTime(low, loc).ordinal() >= target {
+		low = low.Add(-dayStartStep)
+	}
+
+	for civilFromTime(high, loc).ordinal() < target {
+		high = high.Add(dayStartStep)
+	}
+
+	for high.Unix()-low.Unix() > 1 {
+		middle := low.Add(high.Sub(low) / midpointDivisor)
+		if civilFromTime(middle, loc).ordinal() >= target {
+			high = middle
+		} else {
+			low = middle
+		}
+	}
+
+	return high.Unix()
+}
 
 // resolvedRange is a Filter with defaults applied.
 type resolvedRange struct {
@@ -254,25 +331,25 @@ func (svc *Service) resolveRange(filter *Filter) (*resolvedRange, error) {
 
 	toStr := filter.To
 	if toStr == "" {
-		toStr = svc.now().In(loc).Format(dateLayout)
+		toStr = civilFromTime(svc.now(), loc).String()
 	}
 
-	toDate, err := parseDate(toStr, loc)
+	toDate, err := parseCivilDate(toStr)
 	if err != nil {
 		return nil, badRequest("invalid to date %q", toStr)
 	}
 
 	fromStr := filter.From
 	if fromStr == "" {
-		fromStr = toDate.AddDate(0, 0, -(defaultRangeDays - 1)).Format(dateLayout)
+		fromStr = toDate.addDays(-(defaultRangeDays - 1)).String()
 	}
 
-	fromDate, err := parseDate(fromStr, loc)
+	fromDate, err := parseCivilDate(fromStr)
 	if err != nil {
 		return nil, badRequest("invalid from date %q", fromStr)
 	}
 
-	if fromDate.After(toDate) {
+	if fromDate.after(toDate) {
 		return nil, badRequest("from %q is after to %q", fromStr, toStr)
 	}
 
@@ -280,14 +357,14 @@ func (svc *Service) resolveRange(filter *Filter) (*resolvedRange, error) {
 	toUnix := filter.ToUnix
 
 	if fromUnix == 0 && toUnix == 0 {
-		fromUnix = fromDate.Unix()
-		toUnix = toDate.AddDate(0, 0, 1).Unix()
+		fromUnix = fromDate.dayStart(loc)
+		toUnix = toDate.addDays(1).dayStart(loc)
 	}
 
-	days := make([]string, 0)
+	days := make([]string, 0, toDate.ordinal()-fromDate.ordinal()+1)
 
-	for day := fromDate; !day.After(toDate); day = day.AddDate(0, 0, 1) {
-		days = append(days, day.Format(dateLayout))
+	for day := fromDate; !day.after(toDate); day = day.addDays(1) {
+		days = append(days, day.String())
 	}
 
 	return &resolvedRange{

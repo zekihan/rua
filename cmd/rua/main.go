@@ -256,6 +256,7 @@ func serve(ctx context.Context, cfg *config.Config) error {
 		IMAPEnabled: cfg.IMAPEnabled(),
 		StaleAfter:  cfg.StaleAfter,
 		Now:         time.Now,
+		Mailboxes:   cfg.IMAPMailboxes,
 	})
 
 	background(ctx, "Metrics collection", func(ctx context.Context) error {
@@ -298,6 +299,7 @@ func serveDemo(ctx context.Context, cfg *config.Config) error {
 		IMAPEnabled: false,
 		StaleAfter:  cfg.StaleAfter,
 		Now:         time.Now,
+		Mailboxes:   nil,
 	})
 
 	demoCfg := *cfg
