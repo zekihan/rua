@@ -225,7 +225,7 @@ export function FailureReports({
                   <td className="small">
                     {formatUnixDateTime(f.arrivalAt, tz)}
                   </td>
-                  <td>{f.domain}</td>
+                  <td className="whitespace-nowrap">{f.domain}</td>
                   <td className="mono whitespace-nowrap">{f.sourceIp}</td>
                   <td>{f.authFailure}</td>
                   <td className="small">
