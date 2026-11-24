@@ -401,6 +401,7 @@ type policyDBRow struct {
 	P         string `db:"p"`
 	Discovery string `db:"discovery"`
 	Domain    string `db:"domain"`
+	Org       string `db:"org"`
 	SP        string `db:"sp"`
 	ReportID  int64  `db:"report_id"`
 	Begin     int64  `db:"begin"`
@@ -466,7 +467,7 @@ func pctEqual(first, second *int) bool {
 func (svc *Service) policyChanges(
 	ctx context.Context, tx *sqlx.Tx, rng *resolvedRange, domain string,
 ) ([]PolicyChange, error) {
-	query := `SELECT r.domain AS domain, r.id AS report_id, r.begin AS begin, r.end AS end,
+	query := `SELECT r.domain AS domain, r.org AS org, r.id AS report_id, r.begin AS begin, r.end AS end,
 		COALESCE(p.p, '') AS p, COALESCE(p.sp, '') AS sp, COALESCE(p.np, '') AS np,
 		p.pct AS pct, COALESCE(p.adkim, '') AS adkim, COALESCE(p.aspf, '') AS aspf,
 		COALESCE(p.fo, '') AS fo, COALESCE(p.testing, '') AS testing,
@@ -491,13 +492,12 @@ func (svc *Service) policyChanges(
 	}
 
 	changes := []PolicyChange{}
-	previous := make(map[string]*Policy)
+	current := make(map[string]*Policy)
+	views := make(map[[2]string]*Policy)
 
 	for index := range rows {
 		row := &rows[index]
-		changes = appendPolicyChange(changes, row, previous, rng)
-		after := rowToPolicy(row)
-		previous[row.Domain] = &after
+		changes = appendPolicyChange(changes, row, current, views, rng)
 	}
 
 	// Stable order by date then domain/report for display.
@@ -524,56 +524,92 @@ func (svc *Service) policyChanges(
 	return changes, nil
 }
 
+// appendPolicyChange tracks the policy each reporter sees per domain. A
+// change is recorded when a reporter's view changes to a policy that is not
+// already the domain's current one, so reporters that pick up a DNS change
+// late, or that omit fields with defaults, do not produce markers.
 func appendPolicyChange(
-	changes []PolicyChange, row *policyDBRow, previous map[string]*Policy, rng *resolvedRange,
+	changes []PolicyChange,
+	row *policyDBRow,
+	current map[string]*Policy,
+	views map[[2]string]*Policy,
+	rng *resolvedRange,
 ) []PolicyChange {
-	after := rowToPolicy(row)
+	raw := rowToPolicy(row)
+	after := normalizePolicy(&raw)
+	view := [2]string{row.Domain, row.Org}
+	previousView, seenByReporter := views[view]
+	views[view] = &after
+
+	before, seen := current[row.Domain]
+
+	switch {
+	case !seen:
+		current[row.Domain] = &after
+	case !seenByReporter, len(policyFields(previousView, &after)) == 0,
+		len(policyFields(before, &after)) == 0:
+		return changes
+	default:
+		current[row.Domain] = &after
+	}
+
 	mid := midpoint(row.Begin, row.End)
-	inRange := mid >= rng.fromUnix && mid < rng.toUnix
-
-	if !inRange {
+	if mid < rng.fromUnix || mid >= rng.toUnix {
 		return changes
 	}
 
-	prev, seen := previous[row.Domain]
-	if !seen {
-		fields := policyFields(&Policy{
-			P:         "",
-			SP:        "",
-			NP:        "",
-			Pct:       nil,
-			ADKIM:     "",
-			ASPF:      "",
-			FO:        "",
-			Testing:   "",
-			Discovery: "",
-		}, &after)
-		if policyIsEmpty(&after) {
-			fields = []string{}
-		}
-
-		return append(changes, PolicyChange{
-			Before: nil, After: after, Domain: row.Domain,
-			Date: midpointDate(row.Begin, row.End, rng.loc), Fields: fields, ReportID: row.ReportID,
-		})
+	change := PolicyChange{
+		Before: nil, After: after, Domain: row.Domain,
+		Date:     midpointDate(row.Begin, row.End, rng.loc),
+		Fields:   []string{},
+		ReportID: row.ReportID,
 	}
 
-	fields := policyFields(prev, &after)
-	if len(fields) == 0 {
-		return changes
+	if seen {
+		beforeCopy := *before
+		change.Before = &beforeCopy
+		change.Fields = policyFields(before, &after)
 	}
 
-	beforeCopy := *prev
-
-	return append(changes, PolicyChange{
-		Before: &beforeCopy, After: after, Domain: row.Domain,
-		Date: midpointDate(row.Begin, row.End, rng.loc), Fields: fields, ReportID: row.ReportID,
-	})
+	return append(changes, change)
 }
 
-func policyIsEmpty(policy *Policy) bool {
-	return policy.P == "" && policy.SP == "" && policy.NP == "" && policy.Pct == nil &&
-		policy.ADKIM == "" && policy.ASPF == "" && policy.Testing == ""
+// normalizePolicy fills the defaults a reporter may leave out, so the same
+// published record compares equal whichever schema reported it.
+func normalizePolicy(raw *Policy) Policy {
+	policy := *raw
+	policy.P = strings.ToLower(policy.P)
+	policy.SP = strings.ToLower(policy.SP)
+	policy.NP = strings.ToLower(policy.NP)
+
+	if policy.SP == "" {
+		policy.SP = policy.P
+	}
+
+	if policy.NP == "" {
+		policy.NP = policy.SP
+	}
+
+	if policy.Pct == nil {
+		full := fullPct
+		policy.Pct = &full
+	}
+
+	policy.ADKIM = defaultString(strings.ToLower(policy.ADKIM), "r")
+	policy.ASPF = defaultString(strings.ToLower(policy.ASPF), "r")
+	policy.Testing = defaultString(strings.ToLower(policy.Testing), "n")
+
+	return policy
+}
+
+const fullPct = 100
+
+func defaultString(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+
+	return value
 }
 
 type newSourcesResult struct {
@@ -659,7 +695,7 @@ func (svc *Service) quietReporters(
 
 	threshold := cutoff - quietDays*daySeconds
 
-	query := `SELECT org AS org, MAX(end) AS last_end FROM reports
+	query := `SELECT org AS org, MIN(end) AS first_end, MAX(end) AS last_end FROM reports
 		WHERE duplicate_of IS NULL AND kind = 'dmarc-aggregate'`
 	args := []any{}
 
@@ -672,8 +708,9 @@ func (svc *Service) quietReporters(
 	query += ` GROUP BY org`
 
 	var rows []struct {
-		Org     string `db:"org"`
-		LastEnd int64  `db:"last_end"`
+		Org      string `db:"org"`
+		FirstEnd int64  `db:"first_end"`
+		LastEnd  int64  `db:"last_end"`
 	}
 
 	err := tx.SelectContext(ctx, &rows, query, args...)
@@ -685,7 +722,7 @@ func (svc *Service) quietReporters(
 
 	for index := range rows {
 		row := &rows[index]
-		if row.LastEnd >= rng.fromUnix || row.LastEnd >= threshold {
+		if row.FirstEnd >= rng.fromUnix || row.LastEnd >= threshold {
 			continue
 		}
 

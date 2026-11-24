@@ -843,3 +843,41 @@ func TestStatusFreshAndMessageRaw(t *testing.T) {
 	_, _, err := fx.svc.MessageRaw(t.Context(), 4242)
 	eq(t, errors.Is(err, ErrNotFound), true)
 }
+
+func TestPolicyChangesIgnoreLaggingReportersAndDefaults(t *testing.T) {
+	t.Parallel()
+
+	rng := new(resolvedRange)
+	rng.toUnix = 1 << 40
+	rng.loc = time.UTC
+	full := 100
+	row := func(id int64, org, policy string, pct *int) policyDBRow {
+		value := new(policyDBRow)
+		value.Pct, value.P, value.Domain, value.Org = pct, policy, "example.com", org
+		value.ReportID, value.Begin, value.End = id, id*daySeconds, id*daySeconds+daySeconds
+
+		return *value
+	}
+
+	rows := []policyDBRow{
+		row(1, "A", "none", &full),
+		row(2, "B", "none", nil),
+		row(3, "A", "reject", &full),
+		row(4, "B", "none", nil),
+		row(5, "B", "reject", nil),
+		row(6, "A", "reject", &full),
+	}
+
+	changes := []PolicyChange{}
+	current := make(map[string]*Policy)
+	views := make(map[[2]string]*Policy)
+
+	for index := range rows {
+		changes = appendPolicyChange(changes, &rows[index], current, views, rng)
+	}
+
+	eq(t, len(changes), 2)
+	eq(t, changes[0].Before == nil, true)
+	eq(t, changes[1].ReportID, int64(3))
+	eqSlice(t, changes[1].Fields, []string{"p", "sp", "np"})
+}
