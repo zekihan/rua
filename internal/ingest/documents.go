@@ -1,12 +1,9 @@
 package ingest
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/emersion/go-message"
@@ -146,65 +143,4 @@ func outerHeaderBlock(header *message.Header) []byte {
 	}
 
 	return out.Bytes()
-}
-
-// headerOnly returns only the header field block of data. Any text
-// after the blank line ending the fields, which is a message body, is
-// dropped.
-func headerOnly(data []byte) []byte {
-	if len(data) == 0 {
-		return nil
-	}
-
-	block, err := readHeaderBlock(bytes.NewReader(data))
-	if err != nil {
-		return headerBlock(data)
-	}
-
-	return block
-}
-
-func readHeaderBlock(body io.Reader) ([]byte, error) {
-	buffered := bufio.NewReader(io.LimitReader(body, MaxReportBytes))
-
-	var data []byte
-
-	lineStart := true
-
-	for {
-		line, err := buffered.ReadSlice('\n')
-		data = append(data, line...)
-
-		continuation := errors.Is(err, bufio.ErrBufferFull)
-		if !continuation && err != nil && !errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("read header block: %w", err)
-		}
-
-		if err != nil && !continuation ||
-			lineStart && (bytes.Equal(line, []byte("\r\n")) || bytes.Equal(line, []byte("\n"))) {
-			break
-		}
-
-		lineStart = !continuation
-	}
-
-	return data, nil
-}
-
-func headerBlock(raw []byte) []byte {
-	for _, sep := range [][]byte{
-		[]byte("\r\n\r\n"), []byte("\n\n"), []byte("\r\n\n"), []byte("\n\r\n"),
-	} {
-		if idx := bytes.Index(raw, sep); idx >= 0 {
-			return raw[:idx+len(sep)]
-		}
-	}
-
-	trimmed := bytes.TrimRight(raw, "\r\n")
-
-	out := make([]byte, 0, len(trimmed)+len("\r\n\r\n"))
-	out = append(out, trimmed...)
-	out = append(out, "\r\n\r\n"...)
-
-	return out
 }

@@ -249,6 +249,20 @@ func TestMalformedOriginalHeadersNeverStoreBody(t *testing.T) {
 			"From: sender@example.com\r\nBODY-MARKER private body\r\n",
 	}
 
+	t.Run("feedback part with trailing text", func(t *testing.T) {
+		pipe, st := fixtureStore(t, defaultOptions())
+		raw := []byte("From: reporter@example.net\r\nSubject: broken feedback\r\n" +
+			"MIME-Version: 1.0\r\n" +
+			multipart("report; report-type=feedback-report", "fb",
+				"Content-Type: message/feedback-report\r\n\r\n"+feedback+
+					"BODY-MARKER private body\r\n",
+				"Content-Type: text/rfc822-headers\r\n\r\nFrom: sender@example.com\r\n"))
+
+		result := mustIngest(t, pipe, raw)
+		assertNoRawBlob(t, st, result.MessageID)
+		assertBlobsFreeOf(t, st, "BODY-MARKER")
+	})
+
 	for name, original := range cases {
 		t.Run(name, func(t *testing.T) {
 			pipe, st := fixtureStore(t, defaultOptions())

@@ -148,7 +148,7 @@ func (ext *extraction) leaf(entity *message.Entity, mediaType string) error {
 			return nil
 		}
 
-		ext.appendDoc(docFeedback, headerOnly(data), "")
+		ext.appendFeedback(data)
 
 		return nil
 	case strings.EqualFold(mediaType, typeOriginal),
@@ -177,7 +177,7 @@ func (ext *extraction) failurePair(parts *failureParts) error {
 				docFeedback, nil, boundedText(parts.feedbackErr.Error(), report.MaxLong),
 			)
 		} else {
-			ext.appendDoc(docFeedback, headerOnly(parts.feedback), "")
+			ext.appendFeedback(parts.feedback)
 		}
 	}
 
@@ -508,4 +508,47 @@ func boundedText(value string, limit int) string {
 	}
 
 	return value[:limit]
+}
+
+// appendFeedback stores a feedback report's field block. Like attached
+// message headers it fails closed: a line that is not a field or a
+// continuation stores only a constant error, never the bytes.
+func (ext *extraction) appendFeedback(data []byte) {
+	block, err := feedbackFields(data)
+	if err != nil {
+		ext.appendDoc(docFeedback, nil, err.Error())
+
+		return
+	}
+
+	ext.appendDoc(docFeedback, block, "")
+}
+
+// feedbackFields returns the header-field block at the start of data, up
+// to the first blank line or the end.
+func feedbackFields(data []byte) ([]byte, error) {
+	var block []byte
+
+	for len(data) > 0 {
+		end := bytes.IndexByte(data, '\n')
+		line := data
+
+		if end >= 0 {
+			line = data[:end+1]
+		}
+
+		data = data[len(line):]
+
+		if bytes.Equal(line, []byte("\r\n")) || bytes.Equal(line, []byte("\n")) {
+			break
+		}
+
+		if !headerLine(line, len(block) == 0) {
+			return nil, errHeaderSyntax
+		}
+
+		block = append(block, line...)
+	}
+
+	return block, nil
 }
