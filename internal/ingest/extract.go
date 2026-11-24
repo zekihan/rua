@@ -38,41 +38,68 @@ var (
 	errNotReport     = errors.New("unrecognized report document")
 )
 
-type document struct {
-	class           report.Class
-	data            []byte
-	originalHeaders []byte
+// extraction is the output of MIME extraction: the stored documents
+// in extraction order and whether the message is failure-containing.
+// Evaluation turns it into class, status, error and rows; for a
+// failure-containing message the documents are persisted and replayed
+// through the same evaluation.
+type extraction struct { //nolint:govet // Documents, reader, flag: logical grouping.
+	docs              []storedDoc
+	reader            *bodyReader
+	failureContaining bool
 }
 
-type extraction struct {
-	firstError   error
-	accept       func(document) error
-	reader       *bodyReader
-	class        report.Class
-	failureCount int
-	hasFailure   bool
-}
-
-func newExtraction(accept func(document) error) *extraction {
+func newExtraction() *extraction {
 	return &extraction{
-		class:        report.ClassOther,
-		reader:       newBodyReader(),
-		accept:       accept,
-		firstError:   nil,
-		failureCount: 0,
-		hasFailure:   false,
+		docs:              nil,
+		reader:            newBodyReader(),
+		failureContaining: false,
 	}
 }
 
-func (ext *extraction) classify(class report.Class) {
-	if ext.class == report.ClassOther {
-		ext.class = class
+// extractMessage runs extraction over a raw message or bare document.
+func extractMessage(
+	raw []byte, entity *message.Entity, headerErr error,
+) (*extraction, error) {
+	ext := newExtraction()
+
+	err := ext.extract(raw, entity, headerErr)
+	if err != nil {
+		return nil, err
 	}
+
+	return ext, nil
+}
+
+func (ext *extraction) appendDoc(kind string, data []byte, errText string) {
+	ext.docs = append(ext.docs, storedDoc{kind: kind, data: data, errText: errText})
 }
 
 func (ext *extraction) failed(err error) {
-	if ext.firstError == nil {
-		ext.firstError = err
+	if err != nil {
+		ext.appendDoc(docExtractError, nil, boundedText(err.Error(), report.MaxLong))
+	}
+}
+
+// failedHint records an extraction error for a part whose media type
+// already classified the message, so replay re-derives that class.
+func (ext *extraction) failedHint(err error, hint report.Class) {
+	if err == nil {
+		return
+	}
+
+	if hint == report.ClassTLS {
+		ext.appendDoc(docTLS, nil, boundedText(err.Error(), report.MaxLong))
+
+		return
+	}
+
+	ext.failed(err)
+}
+
+func (ext *extraction) seen(mediaType string, params map[string]string) {
+	if strings.EqualFold(mediaType, typeFeedback) || isFeedbackReport(mediaType, params) {
+		ext.failureContaining = true
 	}
 }
 
@@ -97,55 +124,72 @@ func (ext *extraction) extract(raw []byte, entity *message.Entity, headerErr err
 		return nil
 	}
 
+	if entity != nil {
+		ext.appendDoc(docOuterHeaders, outerHeaderBlock(&entity.Header), "")
+	}
+
 	hooks := &mimeHooks{
-		fail:           ext.failed,
-		leaf:           ext.leaf,
-		multipartStart: nil,
-		multipartEnd:   nil,
-		failurePair:    ext.failurePair,
+		fail:        ext.failed,
+		seen:        ext.seen,
+		leaf:        ext.leaf,
+		failurePair: ext.failurePair,
 	}
 
 	return walkMIME(entity, 0, ext.reader, hooks)
 }
 
 func (ext *extraction) leaf(entity *message.Entity, mediaType string) error {
-	return ext.part(entity.Body, mediaType, false)
+	switch {
+	case strings.EqualFold(mediaType, typeFeedback):
+		data, err := ext.reader.read(entity.Body)
+		if err != nil {
+			ext.appendDoc(docFeedback, nil, boundedText(err.Error(), report.MaxLong))
+
+			return nil
+		}
+
+		ext.appendDoc(docFeedback, headerOnly(data), "")
+
+		return nil
+	case strings.EqualFold(mediaType, typeOriginal),
+		strings.EqualFold(mediaType, typeOriginalHeaders):
+		data, err := ext.reader.readOriginalHeaders(entity.Body)
+		if err != nil {
+			ext.appendDoc(docOriginalHeaders, nil, boundedText(err.Error(), report.MaxLong))
+
+			return nil
+		}
+
+		ext.appendDoc(docOriginalHeaders, data, "")
+
+		return nil
+	default:
+		return ext.part(entity.Body, mediaType, false)
+	}
 }
 
-func (ext *extraction) failurePair(feedback, headers []byte, headerError bool) error {
-	return ext.failure(failureParts{
-		feedback: feedback, headers: headers, headerError: headerError,
-	})
-}
-
-func (ext *extraction) failure(parts failureParts) error {
-	if len(parts.feedback) == 0 {
-		return nil
+func (ext *extraction) failurePair(parts *failureParts) error {
+	if parts.hasFeedback {
+		if parts.feedbackErr != nil {
+			ext.appendDoc(
+				docFeedback, nil, boundedText(parts.feedbackErr.Error(), report.MaxLong),
+			)
+		} else {
+			ext.appendDoc(docFeedback, headerOnly(parts.feedback), "")
+		}
 	}
 
-	entity, err := readHeader(parts.feedback)
-	if err != nil {
-		ext.failed(fmt.Errorf("read feedback fields: %w", err))
-
-		return nil
+	if parts.hasHeaders {
+		if parts.headerErr != nil {
+			ext.appendDoc(
+				docOriginalHeaders, nil, boundedText(parts.headerErr.Error(), report.MaxLong),
+			)
+		} else {
+			ext.appendDoc(docOriginalHeaders, parts.headers, "")
+		}
 	}
 
-	if !strings.EqualFold(entity.Header.Get("Feedback-Type"), "auth-failure") {
-		return nil
-	}
-
-	ext.classify(report.ClassFailure)
-	ext.hasFailure = true
-	ext.failureCount++
-
-	if parts.headerError {
-		return nil
-	}
-
-	return ext.accept(document{
-		class: report.ClassFailure, data: parts.feedback,
-		originalHeaders: parts.headers,
-	})
+	return nil
 }
 
 func readHeader(raw []byte) (*message.Entity, error) {
@@ -191,9 +235,8 @@ func (ext *extraction) part(reader io.Reader, mediaType string, expected bool) e
 	}
 
 	hint := report.ClassOther
-	if mediaType == typeTLSJSON || mediaType == typeTLSGzip {
+	if strings.EqualFold(mediaType, typeTLSJSON) || strings.EqualFold(mediaType, typeTLSGzip) {
 		hint = report.ClassTLS
-		ext.classify(hint)
 
 		expected = true
 	}
@@ -206,7 +249,7 @@ func (ext *extraction) part(reader io.Reader, mediaType string, expected bool) e
 	default:
 		data, err := ext.reader.read(buffered)
 		if err != nil {
-			ext.failed(err)
+			ext.failedHint(err, hint)
 
 			return nil
 		}
@@ -218,7 +261,7 @@ func (ext *extraction) part(reader io.Reader, mediaType string, expected bool) e
 func (ext *extraction) gzip(reader io.Reader, hint report.Class) error {
 	gz, err := gzip.NewReader(reader)
 	if err != nil {
-		ext.failed(fmt.Errorf("open gzip report: %w", err))
+		ext.failedHint(fmt.Errorf("open gzip report: %w", err), hint)
 
 		return nil
 	}
@@ -227,13 +270,13 @@ func (ext *extraction) gzip(reader io.Reader, hint report.Class) error {
 
 	err = errors.Join(err, gz.Close())
 	if err != nil {
-		ext.failed(err)
+		ext.failedHint(err, hint)
 
 		return nil
 	}
 
 	if isZip(data) || isGzip(data) {
-		ext.failed(errNestedArchive)
+		ext.failedHint(errNestedArchive, hint)
 
 		return nil
 	}
@@ -246,13 +289,13 @@ func (ext *extraction) zip(reader io.Reader, hint report.Class) error {
 	// are already bounded by MaxMessageBytes; each entry has a separate cap.
 	data, err := io.ReadAll(io.LimitReader(reader, int64(MaxMessageBytes)+1))
 	if err != nil {
-		ext.failed(fmt.Errorf("read zip archive: %w", err))
+		ext.failedHint(fmt.Errorf("read zip archive: %w", err), hint)
 
 		return nil
 	}
 
 	if len(data) > MaxMessageBytes {
-		ext.failed(errMessageLimit)
+		ext.failedHint(errMessageLimit, hint)
 
 		return nil
 	}
@@ -263,27 +306,27 @@ func (ext *extraction) zip(reader io.Reader, hint report.Class) error {
 func (ext *extraction) openZip(data []byte, hint report.Class) error {
 	err := checkZipDirectory(data)
 	if err != nil {
-		ext.failed(err)
+		ext.failedHint(err, hint)
 
 		return nil
 	}
 
 	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		ext.failed(fmt.Errorf("open zip archive: %w", err))
+		ext.failedHint(fmt.Errorf("open zip archive: %w", err), hint)
 
 		return nil
 	}
 
 	if len(archive.File) > MaxZipEntries {
-		ext.failed(errZipEntries)
+		ext.failedHint(errZipEntries, hint)
 
 		return nil
 	}
 
 	err = checkZipEntries(archive.File)
 	if err != nil {
-		ext.failed(err)
+		ext.failedHint(err, hint)
 
 		return nil
 	}
@@ -333,7 +376,7 @@ func (ext *extraction) zipDocuments(files []*zip.File, hint report.Class) error 
 
 		reader, err := file.Open()
 		if err != nil {
-			ext.failed(fmt.Errorf("open zip entry: %w", err))
+			ext.failedHint(fmt.Errorf("open zip entry: %w", err), hint)
 
 			continue
 		}
@@ -342,7 +385,7 @@ func (ext *extraction) zipDocuments(files []*zip.File, hint report.Class) error 
 
 		err = errors.Join(err, reader.Close())
 		if err != nil {
-			ext.failed(err)
+			ext.failedHint(err, hint)
 
 			if errors.Is(err, errMessageLimit) {
 				return nil
@@ -365,7 +408,7 @@ func (ext *extraction) zipDocuments(files []*zip.File, hint report.Class) error 
 	}
 
 	if !found {
-		ext.failed(errNotReport)
+		ext.failedHint(errNotReport, hint)
 	}
 
 	return nil
@@ -378,16 +421,25 @@ func (ext *extraction) deliver(data []byte, hint report.Class, expected bool) er
 	}
 
 	if expected {
-		ext.failed(errNotReport)
+		ext.failedHint(errNotReport, hint)
 	}
 
 	return nil
 }
 
 func (ext *extraction) deliverClass(data []byte, class report.Class) error {
-	ext.classify(class)
+	switch class {
+	case report.ClassAggregate:
+		ext.appendDoc(docAggregate, data, "")
+	case report.ClassTLS:
+		ext.appendDoc(docTLS, data, "")
+	case report.ClassFailure, report.ClassOther:
+		ext.failed(errNotReport)
+	default:
+		ext.failed(errNotReport)
+	}
 
-	return ext.accept(document{class: class, data: data, originalHeaders: nil})
+	return nil
 }
 
 func documentClass(data []byte, hint report.Class) report.Class {

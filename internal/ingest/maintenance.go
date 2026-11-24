@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/emersion/go-message"
 	"github.com/jmoiron/sqlx"
 
 	"github.com/zekihan/rua/internal/report"
@@ -148,7 +149,9 @@ func (pipe *Pipeline) rebuild(ctx context.Context, tx *sqlx.Tx) (int, bool, erro
 		}
 
 		err = tx.GetContext(ctx, &row, `SELECT id, blob FROM messages
-			WHERE id > ? AND blob IS NOT NULL ORDER BY id LIMIT 1`, lastID)
+			WHERE id > ? AND (blob IS NOT NULL OR EXISTS
+				(SELECT 1 FROM documents WHERE message = messages.id))
+			ORDER BY id LIMIT 1`, lastID)
 		if errors.Is(err, sql.ErrNoRows) {
 			break
 		}
@@ -187,31 +190,24 @@ func rebuildMessage(
 	ctx context.Context, tx *sqlx.Tx, id int64, digest []byte,
 	preserved map[reportIdentity][]int64,
 ) (bool, error) {
-	raw, err := store.GetBlob(ctx, tx, digest)
-	if err != nil {
-		return false, fmt.Errorf("read raw message for reparse: %w", err)
-	}
-
 	var state messageWrite
 
 	state.preserved = preserved
 	state.result.MessageID = id
 
-	err = state.parse(ctx, tx, raw)
-	if err != nil {
-		return false, err
+	var (
+		blob []byte
+		err  error
+	)
+
+	if len(digest) > 0 {
+		blob, err = rebuildFromRaw(ctx, tx, &state, id, digest)
+	} else {
+		err = rebuildFromDocuments(ctx, tx, &state, id)
 	}
 
-	blob := digest
-
-	if state.hasFailure {
-		sanitized := buildStoredCopy(raw, state.outcome())
-		if !bytes.Equal(sanitized, raw) {
-			blob, err = store.PutBlob(ctx, tx, sanitized)
-			if err != nil {
-				return false, fmt.Errorf("save sanitized failure message: %w", err)
-			}
-		}
+	if err != nil {
+		return false, err
 	}
 
 	_, err = tx.ExecContext(ctx, `UPDATE messages
@@ -222,6 +218,70 @@ func rebuildMessage(
 	}
 
 	return state.recordsAdded, nil
+}
+
+// rebuildFromRaw re-extracts a message with a raw blob, converting it
+// to stored documents when it turns out failure-containing. It
+// returns the blob digest the message keeps, nil for documents.
+func rebuildFromRaw(
+	ctx context.Context, tx *sqlx.Tx, state *messageWrite, id int64, digest []byte,
+) ([]byte, error) {
+	raw, err := store.GetBlob(ctx, tx, digest)
+	if err != nil {
+		return nil, fmt.Errorf("read raw message for reparse: %w", err)
+	}
+
+	var (
+		entity    *message.Entity
+		headerErr error
+	)
+	if !looksBare(raw) {
+		entity, headerErr = message.Read(bytes.NewReader(raw))
+	}
+
+	// Stored blobs left by older versions are plain MIME here, and
+	// X-Rua-Ingest-* fields in them have no meaning: they are unknown
+	// headers and cannot affect class, status or error.
+	collection, err := extractMessage(raw, entity, headerErr)
+	if err != nil {
+		return nil, err
+	}
+
+	state.failureContaining = collection.failureContaining
+
+	err = state.applyDocuments(ctx, tx, collection.docs)
+	if err != nil {
+		return nil, err
+	}
+
+	if collection.failureContaining {
+		err = writeDocuments(ctx, tx, id, collection.docs)
+		if err != nil {
+			return nil, err
+		}
+
+		return nil, nil
+	}
+
+	err = deleteDocuments(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	return digest, nil
+}
+
+func rebuildFromDocuments(
+	ctx context.Context, tx *sqlx.Tx, state *messageWrite, id int64,
+) error {
+	docs, err := loadDocuments(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+
+	state.failureContaining = true
+
+	return state.applyDocuments(ctx, tx, docs)
 }
 
 func (pipe *Pipeline) cutoff(days int) int64 {
@@ -240,7 +300,8 @@ func setParserVersion(ctx context.Context, tx *sqlx.Tx) error {
 func deleteUnusedBlobs(ctx context.Context, tx *sqlx.Tx) error {
 	_, err := tx.ExecContext(ctx, `DELETE FROM blobs
 		WHERE sha256 NOT IN (SELECT blob FROM messages WHERE blob IS NOT NULL)
-		  AND sha256 NOT IN (SELECT blob FROM reports)`)
+		  AND sha256 NOT IN (SELECT blob FROM reports)
+		  AND sha256 NOT IN (SELECT blob FROM documents WHERE blob IS NOT NULL)`)
 	if err != nil {
 		return fmt.Errorf("delete unreferenced blobs: %w", err)
 	}
@@ -323,6 +384,15 @@ func applyRetention(ctx context.Context, tx *sqlx.Tx, cutoff int64) (int64, erro
 	}
 
 	for _, id := range messages {
+		_, err = tx.ExecContext(ctx, `DELETE FROM documents
+			WHERE message = ?
+			  AND NOT EXISTS (SELECT 1 FROM reports WHERE message = ?)
+			  AND NOT EXISTS (SELECT 1 FROM failure_reports WHERE message = ?)`,
+			id, id, id)
+		if err != nil {
+			return 0, fmt.Errorf("delete pruned message documents: %w", err)
+		}
+
 		_, err = tx.ExecContext(ctx, `UPDATE messages SET blob = NULL, status = ?
 			WHERE id = ?
 			  AND NOT EXISTS (SELECT 1 FROM reports WHERE message = ?)

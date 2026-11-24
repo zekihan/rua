@@ -12,8 +12,7 @@ import (
 )
 
 // bodyReader reads decoded entity bodies under the shared report and
-// message budgets. Extraction and sanitization both use it, so they apply
-// the same transfer decoding (the entity's decoded body) and limits.
+// message budgets, applying the entity's transfer decoding and limits.
 type bodyReader struct {
 	remaining int64
 }
@@ -76,21 +75,23 @@ func (reader *bodyReader) readOriginalHeaders(body io.Reader) ([]byte, error) {
 	return reader.account(data, limit, nil)
 }
 
-type failureParts struct {
+type failureParts struct { //nolint:govet // Feedback, headers, presence: logical grouping.
 	feedback    []byte
+	feedbackErr error
 	headers     []byte
-	headerError bool
+	headerErr   error
+	hasFeedback bool
+	hasHeaders  bool
 }
 
-// mimeHooks are the visitor callbacks for walkMIME. Sanitization is a
-// visitor over the same walk extraction uses, so the two can never
-// disagree about what is a failure report.
+// mimeHooks are the visitor callbacks for walkMIME, including a seen
+// hook called for every entity whose content type parsed, so
+// structural failure detection sees exactly what extraction sees.
 type mimeHooks struct {
-	fail           func(error)
-	leaf           func(entity *message.Entity, mediaType string) error
-	multipartStart func(entity *message.Entity, isFeedback bool) error
-	multipartEnd   func(entity *message.Entity, isFeedback bool) error
-	failurePair    func(feedback, headers []byte, headerError bool) error
+	fail        func(error)
+	seen        func(mediaType string, params map[string]string)
+	leaf        func(entity *message.Entity, mediaType string) error
+	failurePair func(parts *failureParts) error
 }
 
 func (hooks *mimeHooks) failed(err error) {
@@ -100,30 +101,34 @@ func (hooks *mimeHooks) failed(err error) {
 }
 
 func isFeedbackReport(mediaType string, params map[string]string) bool {
-	return mediaType == "multipart/report" &&
-		strings.EqualFold(params["report-type"], "feedback-report")
-}
-
-func feedbackIsAuth(feedback []byte) (bool, error) {
-	entity, err := readHeader(feedback)
-	if err != nil {
-		return false, err
+	if !strings.EqualFold(mediaType, "multipart/report") {
+		return false
 	}
 
-	return strings.EqualFold(entity.Header.Get("Feedback-Type"), "auth-failure"), nil
+	for key, value := range params {
+		if strings.EqualFold(key, "report-type") {
+			return strings.EqualFold(value, "feedback-report")
+		}
+	}
+
+	return false
 }
 
 func emitFailurePair(parts *failureParts, hooks *mimeHooks) error {
-	if len(parts.feedback) == 0 || hooks == nil || hooks.failurePair == nil {
+	if !parts.hasFeedback && !parts.hasHeaders {
 		return nil
 	}
 
-	return hooks.failurePair(parts.feedback, parts.headers, parts.headerError)
+	if hooks == nil || hooks.failurePair == nil {
+		return nil
+	}
+
+	return hooks.failurePair(parts)
 }
 
-// walkMIME is the single MIME walker shared by extraction and
-// sanitization: same header parsing (go-message), same content-type and
-// parameter handling, same transfer decoding and limits.
+// walkMIME is the single MIME walker extraction uses: header parsing
+// (go-message), content-type and parameter handling, transfer
+// decoding and limits all live here.
 func walkMIME(
 	entity *message.Entity, depth int, reader *bodyReader, hooks *mimeHooks,
 ) error {
@@ -132,6 +137,10 @@ func walkMIME(
 		hooks.failed(fmt.Errorf("invalid MIME content type: %w", err))
 
 		return nil
+	}
+
+	if hooks != nil && hooks.seen != nil {
+		hooks.seen(mediaType, params)
 	}
 
 	parts := entity.MultipartReader()
@@ -151,13 +160,6 @@ func walkMIME(
 
 	isFeedback := isFeedbackReport(mediaType, params)
 
-	if hooks != nil && hooks.multipartStart != nil {
-		startErr := hooks.multipartStart(entity, isFeedback)
-		if startErr != nil {
-			return startErr
-		}
-	}
-
 	var feedback failureParts
 
 	err = walkMultipartChildren(parts, depth, reader, hooks, isFeedback, &feedback)
@@ -166,14 +168,7 @@ func walkMIME(
 	}
 
 	if isFeedback {
-		err := emitFailurePair(&feedback, hooks)
-		if err != nil {
-			return err
-		}
-	}
-
-	if hooks != nil && hooks.multipartEnd != nil {
-		return hooks.multipartEnd(entity, isFeedback)
+		return emitFailurePair(&feedback, hooks)
 	}
 
 	return nil
@@ -223,31 +218,38 @@ func readFailurePart(
 		return false, nil //nolint:nilerr // The generic walk reports the invalid Content-Type.
 	}
 
-	switch mediaType {
-	case typeFeedback:
-		if len(parts.feedback) > 0 {
+	switch {
+	case strings.EqualFold(mediaType, typeFeedback):
+		if parts.hasFeedback {
 			err := emitFailurePair(parts, hooks)
 			if err != nil {
 				return true, err
 			}
 
-			*parts = failureParts{feedback: nil, headers: nil, headerError: false}
+			*parts = failureParts{
+				feedback: nil, feedbackErr: nil, headers: nil, headerErr: nil,
+				hasFeedback: false, hasHeaders: false,
+			}
 		}
+
+		parts.hasFeedback = true
 
 		data, err := reader.read(entity.Body)
 		if err != nil {
-			hooks.failed(err)
+			parts.feedbackErr = err
 		} else {
 			parts.feedback = data
 		}
-	case typeOriginal, typeOriginalHeaders:
+	case strings.EqualFold(mediaType, typeOriginal),
+		strings.EqualFold(mediaType, typeOriginalHeaders):
+		parts.hasHeaders = true
+
 		data, err := reader.readOriginalHeaders(entity.Body)
 		if err != nil {
-			hooks.failed(err)
-
-			parts.headerError = true
+			parts.headerErr = err
 		} else {
 			parts.headers = data
+			parts.headerErr = nil
 		}
 	default:
 		return false, nil

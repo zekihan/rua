@@ -351,29 +351,77 @@ func TestOtherFailureAndSkip(t *testing.T) {
 	}
 }
 
-func storedMessageBlob(t *testing.T, st *store.Store, id int64) []byte {
+func assertNoRawBlob(t *testing.T, st *store.Store, id int64) {
 	t.Helper()
 
-	var blob []byte
+	assertEqual(
+		t,
+		scalar[bool](t, st, "SELECT blob IS NULL FROM messages WHERE id=?", id),
+		true,
+	)
+
+	if scalar[int](t, st, "SELECT count(*) FROM documents WHERE message=?", id) == 0 {
+		t.Fatalf("message %d has no stored documents", id)
+	}
+}
+
+func assertBlobsFreeOf(t *testing.T, st *store.Store, markers ...string) {
+	t.Helper()
 
 	err := st.Read(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
-		var digest []byte
+		var digests [][]byte
 
-		err := tx.GetContext(ctx, &digest, "SELECT blob FROM messages WHERE id=?", id)
+		err := tx.SelectContext(ctx, &digests, "SELECT sha256 FROM blobs")
 		if err != nil {
-			return fmt.Errorf("read message blob digest: %w", err)
+			return fmt.Errorf("list blobs: %w", err)
 		}
 
-		blob, err = store.GetBlob(ctx, tx, digest)
+		for _, digest := range digests {
+			data, err := store.GetBlob(ctx, tx, digest)
+			if err != nil {
+				return fmt.Errorf("read blob: %w", err)
+			}
+
+			for _, marker := range markers {
+				if bytes.Contains(data, []byte(marker)) {
+					t.Fatalf("stored blob leaks %q: %q", marker, data)
+				}
+			}
+		}
+
+		return nil
+	})
+	mustSucceed(t, err)
+}
+
+func documentData(t *testing.T, st *store.Store, id int64) []byte {
+	t.Helper()
+
+	var out []byte
+
+	err := st.Read(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		var digests [][]byte
+
+		err := tx.SelectContext(ctx, &digests,
+			"SELECT blob FROM documents WHERE message=? AND blob IS NOT NULL ORDER BY seq", id)
 		if err != nil {
-			return fmt.Errorf("read message blob: %w", err)
+			return fmt.Errorf("list documents: %w", err)
+		}
+
+		for _, digest := range digests {
+			data, err := store.GetBlob(ctx, tx, digest)
+			if err != nil {
+				return fmt.Errorf("read document blob: %w", err)
+			}
+
+			out = append(out, data...)
 		}
 
 		return nil
 	})
 	mustSucceed(t, err)
 
-	return blob
+	return out
 }
 
 func failureMessageFixture() []byte {
@@ -391,7 +439,7 @@ func failureMessageFixture() []byte {
 			"Content-Type: message/rfc822\r\n\r\n"+original))
 }
 
-func TestFailureBlobSanitized(t *testing.T) {
+func TestFailureStoredAsDocuments(t *testing.T) {
 	pipe, st := fixtureStore(t, defaultOptions())
 	raw := failureMessageFixture()
 
@@ -401,15 +449,13 @@ func TestFailureBlobSanitized(t *testing.T) {
 	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM failure_reports"), 1)
 	assertEqual(t, scalar[string](t, st, "SELECT orig_subject FROM failure_reports"), "original")
 
-	blob := storedMessageBlob(t, st, result.MessageID)
-	if bytes.Contains(blob, []byte("private original body")) ||
-		bytes.Contains(blob, []byte("human secret")) {
-		t.Fatalf("stored failure blob leaks body: %q", blob)
-	}
+	assertNoRawBlob(t, st, result.MessageID)
+	assertBlobsFreeOf(t, st, "private original body", "human secret")
 
-	if !bytes.Contains(blob, []byte("Feedback-Type: auth-failure")) ||
-		!bytes.Contains(blob, []byte("Subject: original")) {
-		t.Fatalf("stored failure blob lost headers: %q", blob)
+	docs := documentData(t, st, result.MessageID)
+	if !bytes.Contains(docs, []byte("Feedback-Type: auth-failure")) ||
+		!bytes.Contains(docs, []byte("Subject: original")) {
+		t.Fatalf("stored documents lost headers: %q", docs)
 	}
 
 	rawDigest := store.Digest(raw)
@@ -449,11 +495,8 @@ func TestFailureBlobSanitized(t *testing.T) {
 	_, err = pipe.Reparse(t.Context())
 	mustSucceed(t, err)
 
-	blob = storedMessageBlob(t, st, result.MessageID)
-	if bytes.Contains(blob, []byte("private original body")) ||
-		bytes.Contains(blob, []byte("human secret")) {
-		t.Fatalf("reparse did not sanitize failure blob: %q", blob)
-	}
+	assertNoRawBlob(t, st, result.MessageID)
+	assertBlobsFreeOf(t, st, "private original body", "human secret")
 
 	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM failure_reports"), 1)
 	assertEqual(t, scalar[string](t, st, "SELECT orig_subject FROM failure_reports"), "original")
@@ -508,7 +551,7 @@ func feedbackReportPart(boundary, domain, subject string) string {
 	)
 }
 
-func TestFailureBlobNestedTrailingAndMultiple(t *testing.T) {
+func TestFailureDocumentsNestedTrailingAndMultiple(t *testing.T) {
 	pipe, st := fixtureStore(t, defaultOptions())
 	raw := []byte(
 		"From: reporter@example.net\r\nTo: rua@example.com\r\nSubject: failure report\r\n" +
@@ -540,24 +583,15 @@ func TestFailureBlobNestedTrailingAndMultiple(t *testing.T) {
 		t.Fatalf("failure rows = %+v, want %+v", got, want)
 	}
 
-	blob := storedMessageBlob(t, st, result.MessageID)
-	for _, marker := range []string{"trailing feedback secret", "private original body"} {
-		if bytes.Contains(blob, []byte(marker)) {
-			t.Fatalf("stored failure blob leaks %q: %q", marker, blob)
-		}
-	}
+	assertNoRawBlob(t, st, result.MessageID)
+	assertBlobsFreeOf(t, st, "trailing feedback secret", "private original body",
+		"human secret explanation")
 
-	// Text outside a failure report is not privacy-sensitive and is copied
-	// verbatim under the new design.
-	if !bytes.Contains(blob, []byte("human secret explanation")) {
-		t.Fatalf("stored failure blob dropped sibling text part: %q", blob)
-	}
-
-	if !bytes.Contains(blob, []byte("Subject: failure report")) ||
-		!bytes.Contains(blob, []byte("Message-ID: <nested@example.net>")) ||
-		bytes.Count(blob, []byte("Content-Type: message/feedback-report")) != 2 ||
-		bytes.Count(blob, []byte("Content-Type: text/rfc822-headers")) != 2 {
-		t.Fatalf("stored failure blob has wrong structure: %q", blob)
+	docs := documentData(t, st, result.MessageID)
+	if !bytes.Contains(docs, []byte("Subject: failure report")) ||
+		!bytes.Contains(docs, []byte("Message-ID: <nested@example.net>")) ||
+		bytes.Count(docs, []byte("Feedback-Type: auth-failure")) != 2 {
+		t.Fatalf("stored documents have wrong structure: %q", docs)
 	}
 
 	rawDigest := store.Digest(raw)
@@ -575,8 +609,8 @@ func TestFailureBlobNestedTrailingAndMultiple(t *testing.T) {
 		t.Fatalf("failure rows after reparse = %+v, want %+v", got, want)
 	}
 
-	if reparsed := storedMessageBlob(t, st, result.MessageID); !bytes.Equal(reparsed, blob) {
-		t.Fatalf("sanitized blob not stable across reparse:\n%q\nwant:\n%q", reparsed, blob)
+	if reparsed := documentData(t, st, result.MessageID); !bytes.Equal(reparsed, docs) {
+		t.Fatalf("documents not stable across reparse:\n%q\nwant:\n%q", reparsed, docs)
 	}
 }
 
@@ -722,10 +756,9 @@ func TestMixedFailureAndReportBothOrders(t *testing.T) {
 				t.Fatalf("failure rows = %+v", before.failures)
 			}
 
-			blob := storedMessageBlob(t, st, result.MessageID)
-			if bytes.Contains(blob, []byte("BODY-MARKER")) {
-				t.Fatalf("stored mixed blob leaks body marker: %q", blob)
-			}
+			assertNoRawBlob(t, st, result.MessageID)
+			assertBlobsFreeOf(t, st, "BODY-MARKER")
+			docs := documentData(t, st, result.MessageID)
 
 			_, err := pipe.Reparse(t.Context())
 			mustSucceed(t, err)
@@ -733,19 +766,19 @@ func TestMixedFailureAndReportBothOrders(t *testing.T) {
 			after := snapshotMixed(t, st, result.MessageID)
 			assertMixedSame(t, &before, &after)
 
-			if reparsed := storedMessageBlob(t, st, result.MessageID); !bytes.Equal(
-				reparsed, blob,
+			if reparsed := documentData(t, st, result.MessageID); !bytes.Equal(
+				reparsed, docs,
 			) {
-				t.Fatalf("sanitized mixed blob not stable:\n%q\nwant:\n%q", reparsed, blob)
+				t.Fatalf("documents not stable:\n%q\nwant:\n%q", reparsed, docs)
 			}
 		})
 	}
 }
 
-// Finding B: a report attachment that failed extraction must survive
-// sanitizing, so a reparse records the same class, status and error instead
-// of erasing the failure and reclassifying the message as a clean failure
-// report.
+// A report attachment that failed extraction is stored as an error
+// document, so a reparse records the same class, status and error
+// instead of erasing the failure and reclassifying the message as a
+// clean failure report.
 func TestMalformedGzipPlusFailureSurvivesReparse(t *testing.T) {
 	pipe, st := fixtureStore(t, defaultOptions())
 
@@ -764,10 +797,9 @@ func TestMalformedGzipPlusFailureSurvivesReparse(t *testing.T) {
 		t.Fatalf("unexpected state before reparse: %+v", before)
 	}
 
-	blob := storedMessageBlob(t, st, result.MessageID)
-	if bytes.Contains(blob, []byte("BODY-MARKER")) {
-		t.Fatalf("stored blob leaks body marker: %q", blob)
-	}
+	assertNoRawBlob(t, st, result.MessageID)
+	assertBlobsFreeOf(t, st, "BODY-MARKER")
+	docs := documentData(t, st, result.MessageID)
 
 	_, err := pipe.Reparse(t.Context())
 	mustSucceed(t, err)
@@ -778,15 +810,14 @@ func TestMalformedGzipPlusFailureSurvivesReparse(t *testing.T) {
 	assertEqual(t, after.class, string(report.ClassTLS))
 	assertEqual(t, after.status, StatusPartial)
 
-	if reparsed := storedMessageBlob(t, st, result.MessageID); !bytes.Equal(reparsed, blob) {
-		t.Fatalf("sanitized blob not stable:\n%q\nwant:\n%q", reparsed, blob)
+	if reparsed := documentData(t, st, result.MessageID); !bytes.Equal(reparsed, docs) {
+		t.Fatalf("documents not stable:\n%q\nwant:\n%q", reparsed, docs)
 	}
 }
 
-// Finding A: base64 of a decompressed report could push the stored envelope
-// over the message budget, so a reparse rejected it and every report
-// vanished. Copying the compressed attachment verbatim keeps the stored
-// blob within a small constant of the raw size.
+// A decompressed report is stored as a document, so replay never
+// re-encodes it into an envelope that could push it over the message
+// budget and lose every report.
 func TestLargeCompressedPlusFailureWithReducedLimit(t *testing.T) {
 	fakeParsers(t)
 
@@ -817,14 +848,8 @@ func TestLargeCompressedPlusFailureWithReducedLimit(t *testing.T) {
 		t.Fatalf("failure rows = %+v", before.failures)
 	}
 
-	blob := storedMessageBlob(t, st, result.MessageID)
-	if len(blob) > len(raw)+4<<10 {
-		t.Fatalf("stored blob %d bytes exceeds raw %d bytes plus 4 KiB", len(blob), len(raw))
-	}
-
-	if bytes.Contains(blob, []byte("BODY-MARKER")) {
-		t.Fatalf("stored blob leaks body marker: %q", blob)
-	}
+	assertNoRawBlob(t, st, result.MessageID)
+	assertBlobsFreeOf(t, st, "BODY-MARKER")
 
 	_, err := pipe.Reparse(t.Context())
 	mustSucceed(t, err)
@@ -833,9 +858,9 @@ func TestLargeCompressedPlusFailureWithReducedLimit(t *testing.T) {
 	assertMixedSame(t, &before, &after)
 }
 
-// One failure container may carry several feedback/header pairs, and the
-// feedback part may be transfer-encoded; the sanitized pair for each must
-// reparse to the same rows.
+// One failure container may carry several feedback/header pairs, and
+// the feedback part may be transfer-encoded; the stored pair for each
+// must reparse to the same rows.
 func TestFailureMultiPairEncodedSurvivesReparse(t *testing.T) {
 	pipe, st := fixtureStore(t, defaultOptions())
 
@@ -869,16 +894,9 @@ func TestFailureMultiPairEncodedSurvivesReparse(t *testing.T) {
 		t.Fatalf("failure rows = %+v", before.failures)
 	}
 
-	blob := storedMessageBlob(t, st, result.MessageID)
-	for _, marker := range []string{"SECRET-A", "SECRET-B", "human SECRET"} {
-		if bytes.Contains(blob, []byte(marker)) {
-			t.Fatalf("stored blob leaks %q: %q", marker, blob)
-		}
-	}
-
-	if !bytes.Contains(blob, []byte("cover note kept")) {
-		t.Fatalf("stored blob dropped sibling text part: %q", blob)
-	}
+	assertNoRawBlob(t, st, result.MessageID)
+	assertBlobsFreeOf(t, st, "SECRET-A", "SECRET-B", "human SECRET", "cover note kept")
+	docs := documentData(t, st, result.MessageID)
 
 	_, err := pipe.Reparse(t.Context())
 	mustSucceed(t, err)
@@ -886,8 +904,8 @@ func TestFailureMultiPairEncodedSurvivesReparse(t *testing.T) {
 	after := snapshotMixed(t, st, result.MessageID)
 	assertMixedSame(t, &before, &after)
 
-	if reparsed := storedMessageBlob(t, st, result.MessageID); !bytes.Equal(reparsed, blob) {
-		t.Fatalf("sanitized blob not stable:\n%q\nwant:\n%q", reparsed, blob)
+	if reparsed := documentData(t, st, result.MessageID); !bytes.Equal(reparsed, docs) {
+		t.Fatalf("documents not stable:\n%q\nwant:\n%q", reparsed, docs)
 	}
 }
 
@@ -923,33 +941,22 @@ func TestFailureOddHeaderSpellingsNeverStoredRaw(t *testing.T) {
 			assertEqual(t, result.Status, StatusOK)
 
 			before := snapshotMixed(t, st, result.MessageID)
-			blob := storedMessageBlob(t, st, result.MessageID)
-
-			if bytes.Equal(blob, raw) {
-				t.Fatalf("recognized failure message stored byte-identical to raw")
-			}
-
-			for _, marker := range []string{"private original body", "human secret"} {
-				if bytes.Contains(blob, []byte(marker)) {
-					t.Fatalf("stored blob leaks %q: %q", marker, blob)
-				}
-			}
+			assertNoRawBlob(t, st, result.MessageID)
+			assertBlobsFreeOf(t, st, "private original body", "human secret")
 
 			_, err := pipe.Reparse(t.Context())
 			mustSucceed(t, err)
 			after := snapshotMixed(t, st, result.MessageID)
 			assertMixedSame(t, &before, &after)
-
-			if reparsed := storedMessageBlob(t, st, result.MessageID); bytes.Equal(reparsed, raw) ||
-				bytes.Contains(reparsed, []byte("private original body")) {
-				t.Fatalf("reparsed blob leaks or is raw: %q", reparsed)
-			}
+			assertNoRawBlob(t, st, result.MessageID)
+			assertBlobsFreeOf(t, st, "private original body")
 		})
 	}
 }
 
-// Case A: a mixed message missing its final boundary is partial on the
-// original ingest; the stored copy must reproduce that through Reparse.
+// A mixed message missing its final boundary is partial on the
+// original ingest; its stored documents must reproduce that through
+// Reparse.
 func TestTruncatedMixedAggregateFailureReparse(t *testing.T) {
 	pipe, st := fixtureStore(t, defaultOptions())
 	complete := []byte("From: reporter@example.net\r\nSubject: mixed truncated\r\n" +
@@ -967,29 +974,18 @@ func TestTruncatedMixedAggregateFailureReparse(t *testing.T) {
 		t.Fatalf("unexpected state before reparse: %+v", before)
 	}
 
-	blob := storedMessageBlob(t, st, result.MessageID)
-	if bytes.Equal(blob, raw) || bytes.Contains(blob, []byte("BODY-MARKER")) {
-		t.Fatalf("stored truncated blob leaks or is raw: %q", blob)
-	}
-
-	if !bytes.Contains(blob, []byte("X-Rua-Ingest-Status: partial")) {
-		t.Fatalf("stored truncated blob lacks fidelity status: %q", blob)
-	}
+	assertNoRawBlob(t, st, result.MessageID)
+	assertBlobsFreeOf(t, st, "BODY-MARKER")
 
 	_, err := pipe.Reparse(t.Context())
 	mustSucceed(t, err)
 	after := snapshotMixed(t, st, result.MessageID)
 	assertMixedSame(t, &before, &after)
-
-	if reparsed := storedMessageBlob(t, st, result.MessageID); bytes.Contains(
-		reparsed, []byte("BODY-MARKER"),
-	) {
-		t.Fatalf("reparsed blob leaks body marker: %q", reparsed)
-	}
+	assertBlobsFreeOf(t, st, "BODY-MARKER")
 }
 
-// Case B: a base64 text/rfc822-headers part containing whitespace must
-// keep the original From, To and Subject through storage and reparse.
+// A base64 text/rfc822-headers part containing whitespace must keep
+// the original From, To and Subject through storage and reparse.
 func TestBase64HeadersWithWhitespaceReparse(t *testing.T) {
 	pipe, st := fixtureStore(t, defaultOptions())
 	feedback := "Feedback-Type: auth-failure\r\nVersion: 1\r\nAuth-Failure: dmarc\r\n" +
@@ -1028,10 +1024,8 @@ func TestBase64HeadersWithWhitespaceReparse(t *testing.T) {
 		t.Fatalf("failure rows before reparse = %+v", before.failures)
 	}
 
-	blob := storedMessageBlob(t, st, result.MessageID)
-	if bytes.Equal(blob, raw) || bytes.Contains(blob, []byte("BODY-MARKER")) {
-		t.Fatalf("stored blob leaks or is raw: %q", blob)
-	}
+	assertNoRawBlob(t, st, result.MessageID)
+	assertBlobsFreeOf(t, st, "BODY-MARKER")
 
 	_, err := pipe.Reparse(t.Context())
 	mustSucceed(t, err)
@@ -1053,77 +1047,14 @@ func TestRuaHeadersCannotBeInjected(t *testing.T) {
 	result := mustIngest(t, pipe, raw)
 	assertEqual(t, result.Status, StatusOK)
 
-	blob := storedMessageBlob(t, st, result.MessageID)
-	if bytes.Contains(blob, []byte("forged failure")) {
-		t.Fatalf("stored blob carries injected Rua header: %q", blob)
-	}
+	assertNoRawBlob(t, st, result.MessageID)
+	assertBlobsFreeOf(t, st, "forged failure", "private body")
 
 	_, err := pipe.Reparse(t.Context())
 	mustSucceed(t, err)
 	assertEqual(t,
 		scalar[string](t, st, "SELECT status FROM messages WHERE id=?", result.MessageID),
 		StatusOK)
-}
-
-func TestSanitizerCountMismatchUsesMinimal(t *testing.T) {
-	raw := failureMessageFixture()
-	orig := evalMessage(raw, false)
-	orig.failureCount += 2
-
-	stored := buildStoredCopy(raw, &orig)
-	if !bytes.Contains(stored, []byte(minimalBoundary)) {
-		t.Fatalf("count mismatch did not use minimal copy: %q", stored)
-	}
-
-	if bytes.Equal(stored, raw) || bytes.Contains(stored, []byte("private original body")) {
-		t.Fatalf("minimal copy leaks or is raw: %q", stored)
-	}
-
-	reparsed := evalMessage(stored, true)
-	if !slices.Equal(reparsed.failures, orig.failures) {
-		t.Fatalf("minimal failures = %+v, want %+v", reparsed.failures, orig.failures)
-	}
-}
-
-func FuzzSanitizeFailure(f *testing.F) {
-	valid := failureMessageFixture()
-
-	f.Add([]byte("plain prefix"))
-	f.Add([]byte("Content-Type : text/plain\r\n\r\n"))
-	f.Add([]byte{0, 1, 2, 0xff})
-
-	f.Fuzz(func(t *testing.T, data []byte) {
-		half := len(data) / 2
-
-		var raw bytes.Buffer
-
-		raw.Write(data[:half])
-		raw.Write(valid)
-		raw.Write(data[half:])
-
-		orig := evalMessage(raw.Bytes(), false)
-		if !orig.hasFailure {
-			return
-		}
-
-		stored := buildStoredCopy(raw.Bytes(), &orig)
-		if bytes.Equal(stored, raw.Bytes()) {
-			t.Fatalf("recognized failure stored byte-identical")
-		}
-
-		if bytes.Contains(stored, []byte("private original body")) ||
-			bytes.Contains(stored, []byte("human secret explanation")) {
-			t.Fatalf("stored copy leaks body")
-		}
-
-		reparsed := evalMessage(stored, true)
-		if !slices.Equal(reparsed.failures, orig.failures) {
-			t.Fatalf(
-				"failure rows differ: got %+v want %+v stored %q",
-				reparsed.failures, orig.failures, stored,
-			)
-		}
-	})
 }
 
 func finishWithin(t *testing.T, name string, fn func()) {
@@ -1154,12 +1085,6 @@ var truncatedMultipart = map[string]string{
 	"truncated nested part headers": "From: reporter@example.net\r\n" +
 		"Content-Type: multipart/mixed; boundary=outer\r\n\r\n" +
 		"--outer\r\nContent-Type: text/plain\r\nX-Trunc",
-}
-
-func TestSanitizeTruncatedMultipart(t *testing.T) {
-	for name, raw := range truncatedMultipart {
-		finishWithin(t, name, func() { _ = sanitizeFailureMessage([]byte(raw), nil) })
-	}
 }
 
 func TestIngestTruncatedMultipart(t *testing.T) {
@@ -1271,13 +1196,22 @@ func TestExtractionLimits(t *testing.T) {
 
 	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM reports"), 0)
 
-	extract := newExtraction(func(document) error { return nil })
+	extract := newExtraction()
 	extract.reader.remaining = int64(len(doc))
 	err := extract.part(bytes.NewReader(doc), "", true)
 	mustSucceed(t, err)
 	err = extract.part(bytes.NewReader(doc), "", true)
 	mustSucceed(t, err)
-	assertEqual(t, extract.firstError, errMessageLimit)
+
+	found := false
+
+	for _, entry := range extract.docs {
+		if entry.kind == docExtractError && entry.errText == errMessageLimit.Error() {
+			found = true
+		}
+	}
+
+	assertEqual(t, found, true)
 }
 
 func TestDedupConflictAndReparse(t *testing.T) {
@@ -1488,7 +1422,7 @@ func TestReparseIfNeededFromVersion2(t *testing.T) {
 	assertEqual(
 		t,
 		scalar[string](t, st, "SELECT value FROM meta WHERE key=?", store.MetaParserVersion),
-		"3",
+		"4",
 	)
 	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM reports"), 1)
 	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM records"), 1)
