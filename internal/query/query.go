@@ -279,16 +279,13 @@ func (date civilDate) after(other civilDate) bool {
 }
 
 // dayStart returns the unix time of the first instant of the civil date
-// in loc. When 00:00 does not exist (DST starts at midnight) time.Date
-// lands on a neighboring day, so search around it for the first
-// instant whose civil date is this one; a wholly skipped date resolves
-// to the start of the next existing date, leaving an empty bucket.
+// in loc. Midnight may not exist (DST starts at midnight) or occur twice
+// (DST ends at 01:00), and time.Date does not promise which instant it
+// picks, so always search around it for the first instant whose civil
+// date is this one; a wholly skipped date resolves to the start of the
+// next existing date, leaving an empty bucket.
 func (date civilDate) dayStart(loc *time.Location) int64 {
 	base := time.Date(date.year, date.month, date.day, 0, 0, 0, 0, loc)
-	if civilFromTime(base, loc) == date {
-		return base.Unix()
-	}
-
 	target := date.ordinal()
 	low := base.Add(-dayStartWindow)
 	high := base.Add(dayStartWindow)

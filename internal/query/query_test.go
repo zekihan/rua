@@ -722,6 +722,25 @@ func TestDayStartMidnightDST(t *testing.T) {
 	}
 }
 
+func TestDayStartRepeatedMidnight(t *testing.T) {
+	t.Parallel()
+
+	// Asia/Amman fell back from 01:00 to 00:00 on 2016-10-28, so midnight
+	// happened twice; the day starts at the first one, 21:00 UTC.
+	loc, err := time.LoadLocation("Asia/Amman")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+
+	civil, err := parseCivilDate("2016-10-28")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := time.Unix(civil.dayStart(loc), 0).UTC().Format("2006-01-02 15:04")
+	eq(t, got, "2016-10-27 21:00")
+}
+
 func reportsFor(t *testing.T, fx *fixture, rawQuery string) ReportsResponse {
 	t.Helper()
 
