@@ -263,6 +263,10 @@ reporter, verdict, time zone) lives in the URL, so any view can be linked and
 shows the same days for everyone. Light and dark themes follow the system.
 Works on a phone.
 
+Daily charts are one tab stop each: arrow keys move between days, Home and End
+jump to the first and last day, and the active day shows the same tooltip as
+hover. Every chart also has a "Show as table" alternative.
+
 The time zone picker sits in the header. Without `tz` in the URL, the UI uses
 the zone last picked in this browser (localStorage), then the browser's own
 zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`), and writes the

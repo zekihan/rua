@@ -115,6 +115,20 @@ function DailyChart({
   const id = useId();
   const [activeDate, setActiveDate] = useState<string>();
   const [activeDay, setActiveDay] = useState<string>();
+  const svgRef = useRef<SVGSVGElement>(null);
+  const hintId = `${id}-hint`;
+  const moveActive = (key: string) => {
+    if (days.length === 0) return false;
+    const current = days.findIndex((day) => day.date === activeDay);
+    let next: number;
+    if (key === "ArrowLeft") next = current < 0 ? days.length - 1 : current - 1;
+    else if (key === "ArrowRight") next = current < 0 ? 0 : current + 1;
+    else if (key === "Home") next = 0;
+    else if (key === "End") next = days.length - 1;
+    else return false;
+    setActiveDay(days[Math.max(0, Math.min(days.length - 1, next))].date);
+    return true;
+  };
   useEffect(() => {
     if (!activeDay) return;
     const close = (event: PointerEvent) => {
@@ -134,7 +148,8 @@ function DailyChart({
     if (existing) existing.push(change);
     else changesByDate.set(change.date, [change]);
   }
-  const active = activeDate ? (changesByDate.get(activeDate) ?? []) : [];
+  const policyDate = activeDate ?? activeDay;
+  const active = policyDate ? (changesByDate.get(policyDate) ?? []) : [];
   const max = maxValue(
     days.map(({ counts }) =>
       series.reduce((sum, { key }) => sum + counts[key], 0),
@@ -182,10 +197,34 @@ function DailyChart({
         ) : (
           <>
             <svg
+              ref={svgRef}
               viewBox={`0 0 ${width} ${height}`}
               className="block w-full overflow-visible"
               role="group"
-              aria-label={label}
+              tabIndex={0}
+              aria-label={`${label}, ${days.length} ${days.length === 1 ? "day" : "days"}${days.length > 0 ? ` from ${days[0].date} to ${days[days.length - 1].date}` : ""}`}
+              aria-describedby={hintId}
+              data-testid="daily-chart-group"
+              onFocus={(event) => {
+                if (
+                  event.target === event.currentTarget &&
+                  event.currentTarget.matches(":focus-visible")
+                )
+                  setActiveDay((current) => current ?? days.at(-1)?.date);
+              }}
+              onBlur={(event) => {
+                if (
+                  !(event.relatedTarget instanceof Node) ||
+                  !event.currentTarget.contains(event.relatedTarget)
+                )
+                  setActiveDay(undefined);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  setActiveDay(undefined);
+                  setActiveDate(undefined);
+                } else if (moveActive(event.key)) event.preventDefault();
+              }}
             >
               {ticks.map((tick) => {
                 const y = bottom - barHeight(tick, limit, bottom - top);
@@ -217,28 +256,23 @@ function DailyChart({
                 return (
                   <g
                     key={date}
-                    tabIndex={0}
+                    tabIndex={-1}
                     role="img"
                     aria-label={dayLabel(date, series, counts, formatNumber)}
                     data-testid="chart-day"
                     data-day={date}
                     className="outline-none"
-                    onFocus={() => setActiveDay(date)}
-                    onBlur={() => setActiveDay(undefined)}
                     onPointerEnter={(event) => {
                       if (event.pointerType !== "touch") setActiveDay(date);
                     }}
                     onPointerLeave={(event) => {
                       if (
                         event.pointerType !== "touch" &&
-                        document.activeElement !== event.currentTarget
+                        !svgRef.current?.contains(document.activeElement)
                       )
                         setActiveDay(undefined);
                     }}
                     onClick={() => setActiveDay(date)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") setActiveDay(undefined);
-                    }}
                   >
                     <rect
                       x={midX(index) - slot / 2}
@@ -295,7 +329,7 @@ function DailyChart({
                 return (
                   <g
                     key={date}
-                    tabIndex={0}
+                    tabIndex={-1}
                     role="img"
                     aria-label={`Policy changes on ${date}: ${dated.map((change) => `${change.domain}, ${policySummary(change)}`).join("; ")}`}
                     data-testid="policy-marker"
@@ -337,6 +371,14 @@ function DailyChart({
                 );
               })}
             </svg>
+            <p id={hintId} className="sr-only">
+              Focus the chart, then use the left and right arrow keys to move
+              between days, and Home or End to jump to the first or last day.
+            </p>
+            <p className="sr-only" aria-live="polite" data-testid="chart-live">
+              {activeCounts &&
+                `${dayLabel(activeCounts.date, series, activeCounts.counts, formatNumber)}${active.map((change) => `. Policy change for ${change.domain}: ${policySummary(change)}`).join("")}`}
+            </p>
             {(active.length > 0 || activeCounts) && (
               <div
                 role="tooltip"
@@ -359,7 +401,7 @@ function DailyChart({
                 {active.length > 0 && (
                   <>
                     {!activeCounts && (
-                      <p className="font-semibold">{activeDate}</p>
+                      <p className="font-semibold">{policyDate}</p>
                     )}
                     {active.map((change) => (
                       <p key={change.reportId}>

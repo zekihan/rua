@@ -2,6 +2,7 @@ import { join } from "node:path";
 import {
   expect,
   test as base,
+  type Locator,
   type Page,
   type TestInfo,
 } from "@playwright/test";
@@ -72,6 +73,10 @@ async function expectUrlParam(page: Page, key: string, value: string | null) {
   await expect
     .poll(() => new URL(page.url()).searchParams.get(key))
     .toBe(value);
+}
+
+function isFocused(locator: Locator) {
+  return locator.evaluate((node) => node === document.activeElement);
 }
 
 function isPhoneViewport(page: Page) {
@@ -206,14 +211,46 @@ test("daily chart bars are inspectable and the chart has a table", async ({
     /^\d{4}-\d{2}-\d{2}: Pass [\d,]+, Forwarded [\d,]+, Fail [\d,]+$/,
   );
 
-  await days.nth(3).focus();
-  const label = (await days.nth(3).getAttribute("aria-label")) ?? "";
-  const [date, counts] = label.split(": ");
+  await expect(days.locator("xpath=self::*[@tabindex='0']")).toHaveCount(0);
+  await expect(chart.getByTestId("daily-chart-group")).toHaveAttribute(
+    "tabindex",
+    "0",
+  );
+
+  const group = chart.getByTestId("daily-chart-group");
+  const toggle = chart.getByTestId("chart-table-toggle");
+  await page.getByTestId("range-picker").focus();
+  for (let i = 0; i < 40 && !(await isFocused(group)); i++)
+    await page.keyboard.press("Tab");
+  await expect(group).toBeFocused();
   const tooltip = chart.getByRole("tooltip");
+  const dayLabelAt = async (index: number) =>
+    (await days.nth(index).getAttribute("aria-label")) ?? "";
+  await expect(tooltip).toContainText(
+    (await dayLabelAt(dayCount - 1)).split(": ")[0],
+  );
+  await page.keyboard.press("ArrowLeft");
+  await expect(tooltip).toContainText(
+    (await dayLabelAt(dayCount - 2)).split(": ")[0],
+  );
+  await page.keyboard.press("Home");
+  await expect(tooltip).toContainText((await dayLabelAt(0)).split(": ")[0]);
+  await page.keyboard.press("ArrowLeft");
+  await expect(tooltip).toContainText((await dayLabelAt(0)).split(": ")[0]);
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowRight");
+  const label = await dayLabelAt(3);
+  const [date, counts] = label.split(": ");
   await expect(tooltip).toContainText(date);
   await expect(tooltip).toContainText(counts.split(", ")[2]);
+  await expect(chart.getByTestId("chart-live")).toHaveText(label);
+  await page.keyboard.press("End");
+  await expect(tooltip).toContainText(
+    (await dayLabelAt(dayCount - 1)).split(": ")[0],
+  );
   await page.keyboard.press("Escape");
   await expect(tooltip).toHaveCount(0);
+  await page.keyboard.press("Tab");
+  await expect(toggle.getByText("Show as table")).toBeFocused();
 
   if (isPhone(info)) {
     await days.nth(5).tap();
@@ -224,7 +261,6 @@ test("daily chart bars are inspectable and the chart has a table", async ({
     await expect(tooltip).toHaveCount(0);
   }
 
-  const toggle = chart.getByTestId("chart-table-toggle");
   await expect(chart.getByTestId("chart-table")).toBeHidden();
   await toggle.getByText("Show as table").click();
   const table = chart.getByTestId("chart-table");
@@ -310,6 +346,9 @@ test("reports paginate and expose the original downloads", async ({
   if (phone) {
     const card = rows.first();
     await expect(card).toContainText(/Messages [\d,]+/);
+    await expect(card.getByTestId("report-card-window")).toHaveText(
+      /^\d{1,2} \w{3} \d{2}:\d{2} – (\d{1,2} \w{3} )?\d{2}:\d{2}$/,
+    );
     await expect(card).toContainText(/Pass rate [\d.]+%/);
     await expect(card).toContainText(/example\.(com|net|org)/);
     await expect(card).toContainText(/\d{4}-\d{2}-\d{2}/);
@@ -441,6 +480,22 @@ test("status shows ingestion data and handles disabled fetch", async ({
     : page.getByTestId("problems-table").locator("tbody tr").first();
   await expect(problem).toBeVisible();
   if (phone) await expect(problem.getByTestId("message-error")).not.toBeEmpty();
+  if (!phone) {
+    const mailbox = page.getByTestId("mailboxes-table");
+    const scroller = mailbox.locator("xpath=..");
+    expect(
+      await scroller.evaluate((node) => node.scrollWidth - node.clientWidth),
+    ).toBeLessThanOrEqual(0);
+    await expect(mailbox.locator("thead th")).toHaveText([
+      "Name",
+      "UIDVALIDITY",
+      "Next UID",
+      "Pending",
+      "Last fetch",
+      "Last success",
+      "Result",
+    ]);
+  }
   await checkPage(page, info, "status");
   const fetchNow = page.getByTestId("fetch-now");
   await expect(fetchNow).toBeDisabled();
@@ -448,9 +503,7 @@ test("status shows ingestion data and handles disabled fetch", async ({
   await expect(page.getByTestId("fetch-disabled-note")).toBeVisible();
 });
 
-test("status shows the pending backlog per mailbox", async ({
-  page,
-}, info) => {
+test("status shows the pending backlog per mailbox", async ({ page }, info) => {
   await page.goto("/status");
   const cells = page.getByTestId(
     isPhone(info) ? "mailbox-card-pending" : "mailbox-pending",
