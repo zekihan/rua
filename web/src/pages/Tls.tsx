@@ -150,7 +150,7 @@ export function TlsDomain(p: PageProps) {
                 {d.policies.map((pol, i) => (
                   <tr key={i}>
                     <td>{pol.type}</td>
-                    <td>{pol.domain}</td>
+                    <td className="whitespace-nowrap">{pol.domain}</td>
                     <td className="mono small">
                       {pol.strings.join(" ") || "—"}
                     </td>

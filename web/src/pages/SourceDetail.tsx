@@ -11,7 +11,7 @@ import {
 import { VerdictBadge } from "../components/Verdict.tsx";
 import { StackedBars } from "../components/DailyChart.tsx";
 import { SplitBar } from "../components/Verdict.tsx";
-import { formatNumber } from "../format.ts";
+import { formatNumber, sourceKindLabel } from "../format.ts";
 import type { Count } from "../api/types.ts";
 
 function CountList({
@@ -62,7 +62,8 @@ export default function SourceDetail(p: PageProps) {
       </a>
       <PageHeading testid="source-detail-heading">{s.name || key}</PageHeading>
       <p className="muted [overflow-wrap:anywhere]">
-        {s.kind} · {s.expected ? "Expected source" : "Unknown source"}{" "}
+        {sourceKindLabel(s.kind)} ·{" "}
+        {s.expected ? "Expected source" : "Unknown source"}{" "}
         {s.rule ? `· Matching rule: ${s.rule}` : "· No matching rule"} ·{" "}
         {formatNumber(s.messages)} messages · first seen {s.firstSeen}, last
         seen {s.lastSeen}
@@ -90,7 +91,7 @@ export default function SourceDetail(p: PageProps) {
               <tbody>
                 {d.ips.map((ip) => (
                   <tr key={ip.ip}>
-                    <td className="mono">{ip.ip}</td>
+                    <td className="mono whitespace-nowrap">{ip.ip}</td>
                     <td className="mono">
                       {ip.ptr || "—"}{" "}
                       {ip.ptrConfirmed ? (

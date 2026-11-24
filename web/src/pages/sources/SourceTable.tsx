@@ -2,7 +2,7 @@ import type { SourceRow } from "../../api/types.ts";
 import type { PageProps } from "../../page-props.ts";
 import { TableScroll } from "../../components/ui.tsx";
 import { SplitBar } from "../../components/Verdict.tsx";
-import { formatNumber, formatPercent } from "../../format.ts";
+import { formatNumber, formatPercent, sourceKindLabel } from "../../format.ts";
 
 export type SortKey =
   "name" | "messages" | "spfAligned" | "dkimAligned" | "firstSeen" | "lastSeen";
@@ -111,7 +111,7 @@ export function SourceTable({
                   </span>
                 )}
                 <p className="small muted">
-                  {source.kind} · {formatNumber(source.ips)}{" "}
+                  {sourceKindLabel(source.kind)} · {formatNumber(source.ips)}{" "}
                   {source.ips === 1 ? "IP" : "IPs"}
                 </p>
               </td>

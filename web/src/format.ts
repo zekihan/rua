@@ -114,3 +114,16 @@ export function formatDateLabel(date: string): string {
 export function formatPending(n: number | null | undefined): string {
   return n === null || n === undefined ? "—" : formatNumber(n);
 }
+
+const sourceKindLabels: Record<string, string> = {
+  rule: "Rule",
+  as: "ASN",
+  ptr: "PTR domain",
+  ip: "IP",
+};
+export function sourceKindLabel(kind: string): string {
+  return sourceKindLabels[kind] ?? kind;
+}
+export function plural(count: number, one: string, many: string): string {
+  return count === 1 ? one : many;
+}

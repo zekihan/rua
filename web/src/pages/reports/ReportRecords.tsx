@@ -2,7 +2,7 @@ import type { RecordDetail } from "../../api/types.ts";
 import type { PageProps } from "../../page-props.ts";
 import { VerdictBadge } from "../../components/Verdict.tsx";
 import { Empty, TableScroll } from "../../components/ui.tsx";
-import { formatNumber } from "../../format.ts";
+import { formatNumber, plural } from "../../format.ts";
 
 export function ReportRecords({
   records,
@@ -32,7 +32,9 @@ export function ReportRecords({
                   <span className="mono font-semibold">{rec.sourceIp}</span>
                   <span className="tabular-nums">
                     <strong>{formatNumber(rec.count)}</strong>{" "}
-                    <span className="small muted">messages</span>
+                    <span className="small muted">
+                      {plural(rec.count, "message", "messages")}
+                    </span>
                   </span>
                 </div>
                 <p className="small">

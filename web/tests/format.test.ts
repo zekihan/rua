@@ -9,6 +9,8 @@ import {
   formatUnixDateTime,
   formatUnixWindow,
   formatPending,
+  sourceKindLabel,
+  plural,
 } from "../src/format.ts";
 test("numbers and percents", () => {
   assert.equal(formatNumber(1234567), "1,234,567");
@@ -71,4 +73,12 @@ test("timestamps outside the Date range render a placeholder", () => {
   assert.equal(formatUnixDate(huge, "UTC"), "—");
   assert.equal(formatUnixDateTime(-huge, "UTC"), "—");
   assert.equal(formatUnixWindow(1, huge, "UTC"), "—");
+});
+
+test("source kinds and plurals read as words", () => {
+  assert.equal(sourceKindLabel("as"), "ASN");
+  assert.equal(sourceKindLabel("ptr"), "PTR domain");
+  assert.equal(sourceKindLabel("custom"), "custom");
+  assert.equal(plural(1, "message", "messages"), "message");
+  assert.equal(plural(2, "message", "messages"), "messages");
 });
