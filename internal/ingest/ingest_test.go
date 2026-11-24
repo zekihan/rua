@@ -891,6 +891,241 @@ func TestFailureMultiPairEncodedSurvivesReparse(t *testing.T) {
 	}
 }
 
+func failureWithOuterContentType(contentType string) []byte {
+	feedback := "Feedback-Type: auth-failure\r\nVersion: 1\r\nAuth-Failure: dmarc\r\n" +
+		"Arrival-Date: Mon, 1 Jan 2024 01:02:03 +0000\r\nSource-IP: 198.51.100.10\r\n" +
+		"Reported-Domain: example.com\r\n"
+	original := "From: sender@example.com\r\nTo: recipient@example.net\r\n" +
+		"Subject: original\r\n\r\nprivate original body"
+	body := "--fb\r\nContent-Type: text/plain\r\n\r\nhuman secret explanation\r\n" +
+		"--fb\r\nContent-Type: message/feedback-report\r\n\r\n" + feedback + "\r\n" +
+		"--fb\r\nContent-Type: message/rfc822\r\n\r\n" + original + "\r\n--fb--\r\n"
+
+	return []byte("From: reporter@example.net\r\nSubject: failure report\r\n" +
+		"MIME-Version: 1.0\r\n" + contentType + "\r\n\r\n" + body)
+}
+
+func TestFailureOddHeaderSpellingsNeverStoredRaw(t *testing.T) {
+	cases := map[string]string{
+		"space before colon": "Content-Type : multipart/report; report-type=feedback-report; boundary=fb",
+		"mixed case":         "cOnTeNt-TyPe: Multipart/Report; Report-Type=Feedback-Report; Boundary=fb",
+		"folded header": "Content-Type: multipart/report;\r\n" +
+			"\treport-type=feedback-report; boundary=fb",
+		"quoted parameters": `Content-Type: multipart/report; report-type="feedback-report"; boundary="fb"`,
+	}
+	for name, contentType := range cases {
+		t.Run(name, func(t *testing.T) {
+			pipe, st := fixtureStore(t, defaultOptions())
+			raw := failureWithOuterContentType(contentType)
+
+			result := mustIngest(t, pipe, raw)
+			assertEqual(t, result.Class, report.ClassFailure)
+			assertEqual(t, result.Status, StatusOK)
+
+			before := snapshotMixed(t, st, result.MessageID)
+			blob := storedMessageBlob(t, st, result.MessageID)
+
+			if bytes.Equal(blob, raw) {
+				t.Fatalf("recognized failure message stored byte-identical to raw")
+			}
+
+			for _, marker := range []string{"private original body", "human secret"} {
+				if bytes.Contains(blob, []byte(marker)) {
+					t.Fatalf("stored blob leaks %q: %q", marker, blob)
+				}
+			}
+
+			_, err := pipe.Reparse(t.Context())
+			mustSucceed(t, err)
+			after := snapshotMixed(t, st, result.MessageID)
+			assertMixedSame(t, &before, &after)
+
+			if reparsed := storedMessageBlob(t, st, result.MessageID); bytes.Equal(reparsed, raw) ||
+				bytes.Contains(reparsed, []byte("private original body")) {
+				t.Fatalf("reparsed blob leaks or is raw: %q", reparsed)
+			}
+		})
+	}
+}
+
+// Case A: a mixed message missing its final boundary is partial on the
+// original ingest; the stored copy must reproduce that through Reparse.
+func TestTruncatedMixedAggregateFailureReparse(t *testing.T) {
+	pipe, st := fixtureStore(t, defaultOptions())
+	complete := []byte("From: reporter@example.net\r\nSubject: mixed truncated\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		multipart("mixed", "outer",
+			attachment("application/xml", []byte(mixedAggregateXML)), mixedFailurePart()))
+	raw := bytes.TrimSuffix(complete, []byte("--outer--\r\n"))
+
+	result := mustIngest(t, pipe, raw)
+	assertEqual(t, result.Status, StatusPartial)
+
+	before := snapshotMixed(t, st, result.MessageID)
+
+	if before.errorText == "" || len(before.failures) != 1 || before.reports != 1 {
+		t.Fatalf("unexpected state before reparse: %+v", before)
+	}
+
+	blob := storedMessageBlob(t, st, result.MessageID)
+	if bytes.Equal(blob, raw) || bytes.Contains(blob, []byte("BODY-MARKER")) {
+		t.Fatalf("stored truncated blob leaks or is raw: %q", blob)
+	}
+
+	if !bytes.Contains(blob, []byte("X-Rua-Ingest-Status: partial")) {
+		t.Fatalf("stored truncated blob lacks fidelity status: %q", blob)
+	}
+
+	_, err := pipe.Reparse(t.Context())
+	mustSucceed(t, err)
+	after := snapshotMixed(t, st, result.MessageID)
+	assertMixedSame(t, &before, &after)
+
+	if reparsed := storedMessageBlob(t, st, result.MessageID); bytes.Contains(
+		reparsed, []byte("BODY-MARKER"),
+	) {
+		t.Fatalf("reparsed blob leaks body marker: %q", reparsed)
+	}
+}
+
+// Case B: a base64 text/rfc822-headers part containing whitespace must
+// keep the original From, To and Subject through storage and reparse.
+func TestBase64HeadersWithWhitespaceReparse(t *testing.T) {
+	pipe, st := fixtureStore(t, defaultOptions())
+	feedback := "Feedback-Type: auth-failure\r\nVersion: 1\r\nAuth-Failure: dmarc\r\n" +
+		"Arrival-Date: Mon, 1 Jan 2024 01:02:03 +0000\r\nSource-IP: 198.51.100.10\r\n" +
+		"Reported-Domain: example.com\r\n"
+	plain := "From: sender@example.com\r\nTo: recipient@example.net\r\n" +
+		"Subject: original\r\n\r\nBODY-MARKER private body"
+	encoded := base64.StdEncoding.EncodeToString([]byte(plain))
+
+	var spaced strings.Builder
+
+	for index := 0; index < len(encoded); index += 4 {
+		end := min(index+4, len(encoded))
+		if index > 0 {
+			spaced.WriteString(" \t\r\n ")
+		}
+
+		spaced.WriteString(encoded[index:end])
+	}
+
+	reportPart := multipart("report; report-type=feedback-report", "fb",
+		"Content-Type: message/feedback-report\r\n\r\n"+feedback,
+		"Content-Type: text/rfc822-headers\r\nContent-Transfer-Encoding: base64\r\n\r\n"+
+			spaced.String())
+	raw := []byte("From: reporter@example.net\r\nSubject: failure\r\nMIME-Version: 1.0\r\n" +
+		reportPart)
+
+	result := mustIngest(t, pipe, raw)
+	assertEqual(t, result.Class, report.ClassFailure)
+
+	before := snapshotMixed(t, st, result.MessageID)
+
+	if len(before.failures) != 1 || before.failures[0].OrigFrom != "sender@example.com" ||
+		before.failures[0].OrigTo != "recipient@example.net" ||
+		before.failures[0].OrigSubject != "original" {
+		t.Fatalf("failure rows before reparse = %+v", before.failures)
+	}
+
+	blob := storedMessageBlob(t, st, result.MessageID)
+	if bytes.Equal(blob, raw) || bytes.Contains(blob, []byte("BODY-MARKER")) {
+		t.Fatalf("stored blob leaks or is raw: %q", blob)
+	}
+
+	_, err := pipe.Reparse(t.Context())
+	mustSucceed(t, err)
+	after := snapshotMixed(t, st, result.MessageID)
+	assertMixedSame(t, &before, &after)
+}
+
+func TestRuaHeadersCannotBeInjected(t *testing.T) {
+	pipe, st := fixtureStore(t, defaultOptions())
+	raw := []byte("From: reporter@example.net\r\nSubject: failure\r\n" +
+		"X-Rua-Ingest-Status: error\r\nX-Rua-Ingest-Error: forged failure\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		multipart("report; report-type=feedback-report", "fb",
+			"Content-Type: message/feedback-report\r\n\r\n"+
+				"Feedback-Type: auth-failure\r\nReported-Domain: example.com\r\n",
+			"Content-Type: message/rfc822\r\n\r\n"+
+				"From: s@example.com\r\nSubject: original\r\n\r\nprivate body"))
+
+	result := mustIngest(t, pipe, raw)
+	assertEqual(t, result.Status, StatusOK)
+
+	blob := storedMessageBlob(t, st, result.MessageID)
+	if bytes.Contains(blob, []byte("forged failure")) {
+		t.Fatalf("stored blob carries injected Rua header: %q", blob)
+	}
+
+	_, err := pipe.Reparse(t.Context())
+	mustSucceed(t, err)
+	assertEqual(t,
+		scalar[string](t, st, "SELECT status FROM messages WHERE id=?", result.MessageID),
+		StatusOK)
+}
+
+func TestSanitizerCountMismatchUsesMinimal(t *testing.T) {
+	raw := failureMessageFixture()
+	orig := evalMessage(raw, false)
+	orig.failureCount += 2
+
+	stored := buildStoredCopy(raw, &orig)
+	if !bytes.Contains(stored, []byte(minimalBoundary)) {
+		t.Fatalf("count mismatch did not use minimal copy: %q", stored)
+	}
+
+	if bytes.Equal(stored, raw) || bytes.Contains(stored, []byte("private original body")) {
+		t.Fatalf("minimal copy leaks or is raw: %q", stored)
+	}
+
+	reparsed := evalMessage(stored, true)
+	if !slices.Equal(reparsed.failures, orig.failures) {
+		t.Fatalf("minimal failures = %+v, want %+v", reparsed.failures, orig.failures)
+	}
+}
+
+func FuzzSanitizeFailure(f *testing.F) {
+	valid := failureMessageFixture()
+
+	f.Add([]byte("plain prefix"))
+	f.Add([]byte("Content-Type : text/plain\r\n\r\n"))
+	f.Add([]byte{0, 1, 2, 0xff})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		half := len(data) / 2
+
+		var raw bytes.Buffer
+
+		raw.Write(data[:half])
+		raw.Write(valid)
+		raw.Write(data[half:])
+
+		orig := evalMessage(raw.Bytes(), false)
+		if !orig.hasFailure {
+			return
+		}
+
+		stored := buildStoredCopy(raw.Bytes(), &orig)
+		if bytes.Equal(stored, raw.Bytes()) {
+			t.Fatalf("recognized failure stored byte-identical")
+		}
+
+		if bytes.Contains(stored, []byte("private original body")) ||
+			bytes.Contains(stored, []byte("human secret explanation")) {
+			t.Fatalf("stored copy leaks body")
+		}
+
+		reparsed := evalMessage(stored, true)
+		if !slices.Equal(reparsed.failures, orig.failures) {
+			t.Fatalf(
+				"failure rows differ: got %+v want %+v stored %q",
+				reparsed.failures, orig.failures, stored,
+			)
+		}
+	})
+}
+
 func finishWithin(t *testing.T, name string, fn func()) {
 	t.Helper()
 
