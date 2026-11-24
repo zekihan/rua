@@ -234,7 +234,7 @@ export function FailureReports({
                   <td>
                     {f.messageId > 0 ? (
                       <a href={messageRawHref(f.messageId)} download>
-                        Raw
+                        Stored message
                       </a>
                     ) : (
                       "—"

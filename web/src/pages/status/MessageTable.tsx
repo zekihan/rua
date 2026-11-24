@@ -63,7 +63,7 @@ export function MessageTable({
                     href={messageRawHref(message.id)}
                     download
                   >
-                    Raw message
+                    Stored message
                   </a>
                 )}
               </li>
@@ -113,7 +113,7 @@ export function MessageTable({
                           href={messageRawHref(message.id)}
                           download
                         >
-                          Raw message
+                          Stored message
                         </a>
                       ) : (
                         "—"
