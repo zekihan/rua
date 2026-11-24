@@ -109,12 +109,7 @@ func (svc *Service) reportStats(
 		return 0, nil, 0, nil
 	}
 
-	recordIDs := make([]int64, 0, len(rows))
-	for index := range rows {
-		recordIDs = append(recordIDs, rows[index].RecordID)
-	}
-
-	authByRecord, err := svc.authForRecords(ctx, tx, recordIDs)
+	authByRecord, err := svc.authForReport(ctx, tx, row.ID)
 	if err != nil {
 		return 0, nil, 0, err
 	}
@@ -139,26 +134,25 @@ func (svc *Service) reportStats(
 	return messages, rate(pass, messages), 0, nil
 }
 
-func (svc *Service) authForRecords(
-	ctx context.Context, tx *sqlx.Tx, recordIDs []int64,
+// authForReport loads auth results for every record of one report. The
+// report-scoped subquery binds a single parameter however many records
+// the report has, unlike an IN list over record ids.
+func (svc *Service) authForReport(
+	ctx context.Context, tx *sqlx.Tx, reportID int64,
 ) (map[int64][]AuthResult, error) {
 	result := make(map[int64][]AuthResult)
 
-	if len(recordIDs) == 0 {
-		return result, nil
-	}
-
-	query, args, err := sqlx.In(`SELECT record AS record_id, method, domain, selector, scope, result
-		FROM auth_results WHERE record IN (?) ORDER BY record, method, domain`, recordIDs)
-	if err != nil {
-		return nil, fmt.Errorf("build auth query: %w", err)
-	}
-
-	query = tx.Rebind(query)
-
 	var rows []authDBRow
 
-	err = tx.SelectContext(ctx, &rows, query, args...)
+	err := tx.SelectContext(
+		ctx,
+		&rows,
+		`SELECT record AS record_id, method, domain, selector, scope, result
+		FROM auth_results
+		WHERE record IN (SELECT id FROM records WHERE report = ?)
+		ORDER BY record, method, domain`,
+		reportID,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("load auth results: %w", err)
 	}
@@ -595,13 +589,7 @@ func (svc *Service) loadRecordsForReport(
 		return nil, fmt.Errorf("load report records: %w", err)
 	}
 
-	recordIDs := make([]int64, 0, len(rows))
-
-	for index := range rows {
-		recordIDs = append(recordIDs, rows[index].RecordID)
-	}
-
-	authByRecord, err := svc.authForRecords(ctx, tx, recordIDs)
+	authByRecord, err := svc.authForReport(ctx, tx, reportID)
 	if err != nil {
 		return nil, err
 	}

@@ -54,29 +54,36 @@ type tlsPolicyRow struct {
 	Failure  int64  `db:"failure"`
 }
 
+const inBatchSize = 500
+
 func (svc *Service) loadTLSPolicies(
 	ctx context.Context, tx *sqlx.Tx, reportIDs []int64,
 ) ([]tlsPolicyRow, error) {
-	if len(reportIDs) == 0 {
-		return []tlsPolicyRow{}, nil
-	}
+	rows := []tlsPolicyRow{}
 
-	query, args, err := sqlx.In(
-		`SELECT id, report, type, domain, strings, mx_hosts, success, failure
-		FROM tls_policies WHERE report IN (?) ORDER BY report, id`,
-		reportIDs,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("build TLS policy query: %w", err)
-	}
+	// Batch the IN list so the bound parameter count stays bounded.
+	for start := 0; start < len(reportIDs); start += inBatchSize {
+		batch := reportIDs[start:min(start+inBatchSize, len(reportIDs))]
 
-	query = tx.Rebind(query)
+		query, args, err := sqlx.In(
+			`SELECT id, report, type, domain, strings, mx_hosts, success, failure
+			FROM tls_policies WHERE report IN (?) ORDER BY report, id`,
+			batch,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("build TLS policy query: %w", err)
+		}
 
-	var rows []tlsPolicyRow
+		query = tx.Rebind(query)
 
-	err = tx.SelectContext(ctx, &rows, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("load TLS policies: %w", err)
+		var batchRows []tlsPolicyRow
+
+		err = tx.SelectContext(ctx, &batchRows, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("load TLS policies: %w", err)
+		}
+
+		rows = append(rows, batchRows...)
 	}
 
 	return rows, nil
@@ -278,14 +285,6 @@ func (svc *Service) tlsFailureGroups(
 		policyIDs = append(policyIDs, policies[index].PolicyID)
 	}
 
-	query, args, err := sqlx.In(`SELECT policy, result_type, receiving_ip, receiving_mx,
-		reason_code, failed_sessions FROM tls_failures WHERE policy IN (?)`, policyIDs)
-	if err != nil {
-		return nil, fmt.Errorf("build TLS failures query: %w", err)
-	}
-
-	query = tx.Rebind(query)
-
 	var rows []struct {
 		ResultType string `db:"result_type"`
 		Receiving  string `db:"receiving_ip"`
@@ -295,9 +294,32 @@ func (svc *Service) tlsFailureGroups(
 		Sessions   int64  `db:"failed_sessions"`
 	}
 
-	err = tx.SelectContext(ctx, &rows, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("load TLS failure groups: %w", err)
+	for start := 0; start < len(policyIDs); start += inBatchSize {
+		batch := policyIDs[start:min(start+inBatchSize, len(policyIDs))]
+
+		query, args, err := sqlx.In(`SELECT policy, result_type, receiving_ip, receiving_mx,
+			reason_code, failed_sessions FROM tls_failures WHERE policy IN (?)`, batch)
+		if err != nil {
+			return nil, fmt.Errorf("build TLS failures query: %w", err)
+		}
+
+		query = tx.Rebind(query)
+
+		var batchRows []struct {
+			ResultType string `db:"result_type"`
+			Receiving  string `db:"receiving_ip"`
+			MX         string `db:"receiving_mx"`
+			Reason     string `db:"reason_code"`
+			Policy     int64  `db:"policy"`
+			Sessions   int64  `db:"failed_sessions"`
+		}
+
+		err = tx.SelectContext(ctx, &batchRows, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("load TLS failure groups: %w", err)
+		}
+
+		rows = append(rows, batchRows...)
 	}
 
 	type failureAgg struct {

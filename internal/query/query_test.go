@@ -899,3 +899,104 @@ func TestParseFilterNormalizesDomainAndBoundsRange(t *testing.T) {
 		t.Fatalf("huge range: %v", err)
 	}
 }
+
+func seedBulkRecords(t *testing.T, fx *fixture, reportID int64, extra int) {
+	t.Helper()
+
+	err := fx.st.Write(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		var maxID int64
+
+		getErr := tx.GetContext(ctx, &maxID, `SELECT COALESCE(MAX(id), 0) FROM records`)
+		if getErr != nil {
+			return fmt.Errorf("max record id: %w", getErr)
+		}
+
+		const batch = 500
+
+		for done := 0; done < extra; done += batch {
+			batchCount := min(batch, extra-done)
+
+			var recSQL strings.Builder
+
+			recSQL.WriteString(`INSERT INTO records
+				(report, source_ip, count, disposition, dkim, spf, reasons,
+				 header_from, envelope_from, envelope_to) VALUES `)
+
+			var authSQL strings.Builder
+
+			authSQL.WriteString(`INSERT INTO auth_results
+				(record, method, domain, selector, scope, result) VALUES `)
+
+			recArgs := make([]any, 0, batchCount*10)
+			authArgs := make([]any, 0, batchCount*12)
+
+			for index := range batchCount {
+				if index > 0 {
+					recSQL.WriteString(",")
+					authSQL.WriteString(",")
+				}
+
+				recSQL.WriteString("(?, '192.0.2.1', 1, 'none', 'pass', 'fail', '[]'," +
+					" 'example.com', 'example.com', 'dest.example.net')")
+
+				recArgs = append(recArgs, reportID)
+
+				recordID := maxID + int64(done+index) + 1
+
+				authSQL.WriteString("(?, 'dkim', 'example.com', 's1', '', 'pass')," +
+					"(?, 'spf', 'example.com', '', '', 'fail')")
+
+				authArgs = append(authArgs, recordID, recordID)
+			}
+
+			_, recErr := tx.ExecContext(ctx, recSQL.String(), recArgs...)
+			if recErr != nil {
+				return fmt.Errorf("insert records: %w", recErr)
+			}
+
+			_, authErr := tx.ExecContext(ctx, authSQL.String(), authArgs...)
+			if authErr != nil {
+				return fmt.Errorf("insert auth results: %w", authErr)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLargeReport(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+	fx.ingest(t, aggregateXML("Google", "big-1", "example.com",
+		unixTime(2025, time.June, 9, 0), unixTime(2025, time.June, 11, 0), "reject", 100,
+		"192.0.2.1", 1, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+
+	list := reportsFor(t, fx, "from=2025-06-01&to=2025-06-15&tz=UTC")
+	eq(t, len(list.Reports), 1)
+
+	const totalRecords = 40_000
+
+	seedBulkRecords(t, fx, list.Reports[0].ID, totalRecords-1)
+
+	list = reportsFor(t, fx, "from=2025-06-01&to=2025-06-15&tz=UTC")
+	eq(t, len(list.Reports), 1)
+	eq(t, list.Reports[0].Messages, int64(totalRecords))
+
+	if list.Reports[0].PassRate == nil || *list.Reports[0].PassRate != 1 {
+		t.Fatalf("passRate = %v", list.Reports[0].PassRate)
+	}
+
+	detail, err := fx.svc.Report(
+		t.Context(), list.Reports[0].ID, fx.filter(t, "tz=UTC"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eq(t, len(detail.Records), totalRecords)
+	eq(t, len(detail.Records[0].Auth), 2)
+}
