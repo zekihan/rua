@@ -27,8 +27,10 @@ certificates, `libs/mtls-policy` and Gatus need no rename.
 | Marks mail read | `EXAMINE` only |
 
 Values: `IMAP_ADDR=mailvault-mailvault-bridge.mailvault.svc.cluster.local:1143`,
-`IMAP_TLS=starttls`, `IMAP_MAILBOXES=Folders/dmarc`, `TIME_ZONE=Europe/Istanbul`,
-`STALE_AFTER=3h`. Pod egress: DNS, the Bridge on 1143 and public DNS
+`IMAP_TLS=starttls`, `IMAP_MAILBOXES=Folders/dmarc`, `STALE_AFTER=3h`,
+`SOURCES_FILE=/config/sources.yaml` from a chart ConfigMap that names and marks
+as expected the known senders (Proton, Amazon SES for `postmaster`,
+Purelymail). The time zone is chosen in the UI. Pod egress: DNS, the Bridge on 1143 and public DNS
 resolvers only if the cluster resolver cannot answer Team Cymru queries
 (it can, through kube-dns, so no extra egress). Ingress from Traefik only;
 metrics port from the monitoring namespace.

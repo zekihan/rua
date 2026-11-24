@@ -201,7 +201,8 @@ shows `forwarded` separately, not as failure.
 A source is a group of IPs that belong to one sender:
 
 1. User rules (`SOURCES_FILE`, optional YAML): name, matched by any of CIDR,
-   PTR suffix, DKIM signing domain or ASN. First match wins.
+   PTR suffix, DKIM signing domain or ASN, and an `expected` flag. First match
+   wins.
 2. Otherwise the AS organisation name from the ASN lookup.
 3. Otherwise the registrable domain of a forward-confirmed PTR
    (public suffix list).
@@ -209,6 +210,23 @@ A source is a group of IPs that belong to one sender:
 
 Rules are applied at query time, so editing the file regroups history
 immediately (the file is reloaded on change).
+
+A source is `expected` only when a rule marks it so; every other source,
+including automatically grouped ones, is `unknown`. The flag drives triage in
+the UI, not verdicts: an expected sender that fails is still `fail`.
+
+```yaml
+- name: Mail provider
+  expected: true
+  match:
+    dkim_domains: [example.com]
+    asns: [64500]
+- name: Newsletter service
+  expected: true
+  match:
+    cidrs: [192.0.2.0/24]
+    ptr_suffixes: [mailer.example.net]
+```
 
 ### Enrichment
 
@@ -228,14 +246,26 @@ the timeline with the first report that showed it.
 
 Aggregate reports cover arbitrary windows, usually 24 hours not aligned to
 midnight. A report's messages are counted on the day containing the window's
-midpoint, in the configured `TIME_ZONE`. Windows longer than 48 hours are
-flagged. Range filters use the same rule, so totals in every view agree.
+midpoint, in the viewer's time zone. Windows longer than 48 hours are flagged.
+Range filters use the same rule, so totals in every view agree.
+
+The zone is chosen in the UI, not configured on the server. Every aggregating
+API call takes `tz` (an IANA name, default `UTC`); the server selects reports
+whose midpoint falls in the requested range and buckets them into days in Go
+with `time.LoadLocation`, so DST transitions are handled correctly. SQL only
+filters by unix time.
 
 ## 8. User interface
 
 React SPA embedded in the binary. Every filter (domain, range, source,
-reporter, verdict) lives in the URL, so any view can be linked. Light and dark
-themes follow the system. Works on a phone.
+reporter, verdict, time zone) lives in the URL, so any view can be linked and
+shows the same days for everyone. Light and dark themes follow the system.
+Works on a phone.
+
+The time zone picker sits in the header. Without `tz` in the URL, the UI uses
+the zone last picked in this browser (localStorage), then the browser's own
+zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`), and writes the
+result into the URL.
 
 ### Overview
 
@@ -245,13 +275,15 @@ themes follow the system. Works on a phone.
   rejected by receivers, reports received.
 - Daily stacked bars by verdict, with policy-change markers.
 - Failing and forwarded volume by source, top 10.
-- New sources first seen in the range.
+- New unknown sources first seen in the range, with their volume and verdicts;
+  new expected sources listed separately.
 - Reporters that have gone quiet: reported before the range, nothing for 7 days.
 
 ### Sources
 
 Table of sources: messages, pass/forwarded/fail split, SPF aligned %, DKIM
-aligned %, DKIM domains seen, first and last seen. Sortable, filterable.
+aligned %, DKIM domains seen, first and last seen. Unknown sources are
+highlighted, and a toggle shows unknown sources only. Sortable, filterable.
 
 Source detail: IPs with PTR and ASN, daily volume, result combinations
 (SPF result × DKIM result × alignment) with counts, envelope-from and DKIM
@@ -280,8 +312,9 @@ conflicts, UIDVALIDITY resets. Fetch now.
 
 ### HTTP
 
-Read-only JSON under `/api`, aggregated in SQL so the client never loads raw
-records. Pagination is cursor-based.
+Read-only JSON under `/api`, aggregated on the server so the client never loads
+raw records. Pagination is cursor-based. Every aggregating route takes `tz`,
+and ranges are `from`/`to` dates in that zone.
 
 | Route | Purpose |
 | --- | --- |
@@ -334,7 +367,6 @@ Environment variables; secrets may come from `<NAME>_FILE`.
 | `RETENTION_DAYS` | `0` | 0 keeps everything |
 | `SOURCES_FILE` | empty | Optional source rules |
 | `LOOKUPS` | `on` | PTR and ASN enrichment |
-| `TIME_ZONE` | `UTC` | Day boundaries |
 | `LISTEN_ADDR` | `:8080` | |
 | `METRICS_ADDR` | `:9090` | Empty disables |
 | `LOG_LEVEL` | `INFO` | |
@@ -366,3 +398,11 @@ Environment variables; secrets may come from `<NAME>_FILE`.
 | Receiver's evaluated result is authoritative | rua cannot re-verify signatures; it classifies what receivers saw |
 | No auth | Authentication is the deployment's job; mTLS in the homelab, a proxy elsewhere |
 | ASN over GeoIP | Names the sender (Google, Amazon SES, a VPS host), needs no licensed database |
+| Time zone chosen per viewer, carried in the URL | Days match the viewer's calendar; a shared link shows the same numbers to everyone; no server-side setting or write endpoint |
+| `expected` flag in source rules, not in the UI | Triage of unknown senders without UI-editable state; rules stay in Git |
+| Three verdicts (`pass`, `forwarded`, `fail`) | Relayed legitimate mail is the main noise in DMARC data; the heuristic is labelled as such |
+| Original messages kept in SQLite, no backup | Small data; the mailbox (backed up by Mailvault) rebuilds everything |
+| Fetch every 30 minutes plus Fetch now | Reports arrive about daily; the button covers "I just changed DNS"; IDLE adds a long-lived Bridge connection for no gain |
+| Staleness is the only alert | p=reject already blocks spoofing; the UI is for looking, Gatus for "it stopped working" |
+| No MCP endpoint in v1 | It would need bearer auth, which conflicts with auth living outside rua |
+| Retention forever, pruning optional | Multi-year trends are useful and the data is small |
