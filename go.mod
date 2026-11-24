@@ -3,6 +3,7 @@ module github.com/zekihan/rua
 go 1.27.4
 
 require (
+	github.com/emersion/go-message v0.18.2
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/klauspost/compress v1.20.5
 	github.com/sethvargo/go-envconfig/v2 v2.0.0
@@ -25,6 +26,7 @@ require (
 	github.com/valyala/fastrand v1.1.0 // indirect
 	github.com/valyala/histogram v1.2.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.14.0 // indirect
 	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect

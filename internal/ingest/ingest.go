@@ -6,16 +6,13 @@
 package ingest
 
 import (
-	"context"
-	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/zekihan/rua/internal/report"
 	"github.com/zekihan/rua/internal/store"
 	"github.com/zekihan/rua/internal/telemetry"
 )
-
-var errNotImplemented = errors.New("not implemented")
 
 // Extraction limits (DESIGN.md section 5).
 const (
@@ -30,20 +27,22 @@ const (
 	StatusPartial = "partial"
 	StatusError   = "error"
 	StatusSkipped = "skipped"
+	// StatusPruned marks messages affected by retention. Fully pruned messages
+	// retain their digest but no longer reference a raw blob.
+	StatusPruned = "pruned"
 )
 
 // Source says where a message came from. Mailbox is empty for imports.
-type Source struct {
+type Source struct { //nolint:govet // Preserve the public field order of Source literals.
 	Mailbox      string
 	UID          uint32
 	InternalDate time.Time
 }
 
 // Result describes what Ingest stored.
-type Result struct {
+type Result struct { //nolint:govet // Preserve the public field order of Result literals.
 	MessageID int64
-	// Known is true when a message with the same SHA-256 was already stored;
-	// nothing was written.
+	// Known is true when the message digest was already stored.
 	Known   bool
 	Class   report.Class
 	Status  string
@@ -61,8 +60,9 @@ type Options struct {
 
 // Pipeline is the single write path for reports.
 type Pipeline struct {
-	store *store.Store
-	opts  Options
+	store     *store.Store
+	opts      Options
+	reparsing atomic.Int32
 }
 
 // New returns a Pipeline writing to st.
@@ -71,30 +71,11 @@ func New(st *store.Store, opts Options) *Pipeline {
 		opts.Now = time.Now
 	}
 
-	return &Pipeline{store: st, opts: opts}
-}
+	pipe := new(Pipeline)
+	pipe.store = st
+	pipe.opts = opts
 
-// Ingest classifies, parses and stores one raw message (RFC 5322 bytes, or
-// for imports a bare report document) in one transaction. A message that
-// cannot be parsed is still stored with its class, status and error. It is
-// safe to call again with the same bytes.
-func (p *Pipeline) Ingest(ctx context.Context, raw []byte, src Source) (Result, error) {
-	_, _, _ = ctx, raw, src
-
-	return Result{}, errNotImplemented
-}
-
-// Skip records a message that was too large to fetch, from its header bytes
-// and its full size, so it is listed on the Status page and not refetched.
-func (p *Pipeline) Skip(
-	ctx context.Context,
-	header []byte,
-	size int64,
-	src Source,
-) (Result, error) {
-	_, _, _, _ = ctx, header, size, src
-
-	return Result{}, errNotImplemented
+	return pipe
 }
 
 // ImportSummary counts the outcome of Import.
@@ -105,38 +86,5 @@ type ImportSummary struct {
 	Failed   int
 }
 
-// Import ingests local .xml, .xml.gz, .zip, .json, .json.gz, .eml and mbox
-// files (and directories of them) through Ingest with an empty mailbox.
-func (p *Pipeline) Import(ctx context.Context, paths []string) (ImportSummary, error) {
-	_, _ = ctx, paths
-
-	return ImportSummary{}, errNotImplemented
-}
-
-// ReparseIfNeeded reparses every stored message when the stored parser
-// version differs from report.ParserVersion. It reports whether it ran.
-func (p *Pipeline) ReparseIfNeeded(ctx context.Context) (bool, error) {
-	_ = ctx
-
-	return false, errNotImplemented
-}
-
-// Reparse rebuilds every derived row from the stored blobs, in one write
-// transaction so readers never see a half-rebuilt state, and records the
-// parser version.
-func (p *Pipeline) Reparse(ctx context.Context) (int, error) {
-	_ = ctx
-
-	return 0, errNotImplemented
-}
-
 // Reparsing reports whether a reparse is running.
-func (p *Pipeline) Reparsing() bool { return false }
-
-// Prune deletes reports whose window ended more than days ago, with their
-// derived rows and unreferenced report blobs. 0 does nothing.
-func (p *Pipeline) Prune(ctx context.Context, days int) (int, error) {
-	_, _ = ctx, days
-
-	return 0, errNotImplemented
-}
+func (pipe *Pipeline) Reparsing() bool { return pipe.reparsing.Load() > 0 }
