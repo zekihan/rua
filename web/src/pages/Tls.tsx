@@ -91,7 +91,11 @@ export function TlsDomain(p: PageProps) {
       <section className="card">
         <h2>Failure types</h2>
         {d.failures.length === 0 ? (
-          <Empty>No failures in this range.</Empty>
+          <Empty>
+            {d.failure > 0
+              ? "No failure details reported."
+              : "No failures in this range."}
+          </Empty>
         ) : (
           <TableScroll label="TLS failure types">
             <table className="min-w-[40rem]" data-testid="tls-failures-table">

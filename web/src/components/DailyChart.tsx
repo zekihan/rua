@@ -126,6 +126,7 @@ function DailyChart({
     else if (key === "Home") next = 0;
     else if (key === "End") next = days.length - 1;
     else return false;
+    setActiveDate(undefined);
     setActiveDay(days[Math.max(0, Math.min(days.length - 1, next))].date);
     return true;
   };
