@@ -299,7 +299,7 @@ func serveDemo(ctx context.Context, cfg *config.Config) error {
 		IMAPEnabled: false,
 		StaleAfter:  cfg.StaleAfter,
 		Now:         time.Now,
-		Mailboxes:   nil,
+		Mailboxes:   []string{demo.Mailbox},
 	})
 
 	demoCfg := *cfg

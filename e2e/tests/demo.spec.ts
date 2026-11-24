@@ -34,15 +34,6 @@ const test = base.extend({
         !message.text().includes("Content Security Policy")
       )
         return;
-      const url = message.location().url;
-      // Remove once the server implements GET /api/reporters; the Receivers
-      // section degrades to a notice until then.
-      if (
-        url.includes("/api/reporters") &&
-        message.text().startsWith("Failed to load resource:") &&
-        message.text().includes("404")
-      )
-        return;
       errors.push(message.text());
     });
     await use(page);
@@ -374,7 +365,7 @@ test("reports paginate and expose the original downloads", async ({
   await checkPage(page, info, "report-tls-detail");
 });
 
-test.fixme("reports list the receivers that report and filter by one", async ({
+test("reports list the receivers that report and filter by one", async ({
   page,
 }) => {
   await page.goto("/reports");
@@ -457,7 +448,7 @@ test("status shows ingestion data and handles disabled fetch", async ({
   await expect(page.getByTestId("fetch-disabled-note")).toBeVisible();
 });
 
-test.fixme("status shows the pending backlog per mailbox", async ({
+test("status shows the pending backlog per mailbox", async ({
   page,
 }, info) => {
   await page.goto("/status");
