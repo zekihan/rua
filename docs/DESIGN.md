@@ -163,6 +163,7 @@ SQLite, WAL, one writer connection. Times are UTC unix seconds.
 | `mailboxes` | name, uidvalidity, next_uid, last fetch result |
 | `messages` | id, sha256, mailbox, uid, internaldate, size, from, subject, class, parse status, parser version |
 | `blobs` | sha256, zstd-compressed raw bytes (whole message and each extracted report) |
+| `documents` | message, seq, kind (`outer-headers`, `aggregate`, `tls`, `feedback`, `original-headers`, `extract-error`), blob, error; in extraction order, a `feedback` row and its `original-headers` row have consecutive seq values, feedback first |
 | `reports` | id, kind, message, reporter org/email/extra contact, report_id, begin, end, policy domain, duplicate_of, conflict flag |
 | `policies` | report, published policy: `p`, `sp`, `np`, `pct`, `adkim`, `aspf`, `fo`, testing |
 | `records` | report, source IP, count, disposition, evaluated DKIM/SPF, override reasons, header_from, envelope_from, envelope_to |
@@ -177,9 +178,27 @@ Schema migrations use `PRAGMA user_version`. A bump of the compiled parser
 version reparses every stored blob in the background and replaces derived rows,
 so improving the parser never needs the mailbox again.
 
+A message is failure-containing when any MIME part reachable within the
+extraction limits has content type `message/feedback-report`, or is
+`multipart/report` with `report-type=feedback-report`, whether or not its
+fields parse. Such a message stores no raw blob (`messages.blob` is NULL).
+Instead its `documents` rows hold exactly what extraction produced, with no
+MIME rewriting: the allowlisted outer header block, the decompressed
+aggregate and TLS documents, each feedback field block with the original
+message's header block only, and an `extract-error` row for each extraction
+or framing error. No original message body is ever stored, so the message
+download for such a message is rendered on the fly from its documents.
+Reparse re-parses the documents in seq order with the current parsers and
+re-derives class, status, error and rows through the same evaluation fresh
+ingest uses, so the two cannot diverge; MIME-level extraction of
+failure-containing messages is frozen at ingest. Messages without failure
+content keep the raw blob and full re-extraction, as do bare imported
+documents, which are never failure-containing.
+
 Retention: kept forever by default. `RETENTION_DAYS` deletes reports whose end
-date is older, together with their records and, if unreferenced, blobs. The
-mailbox remains the long-term archive.
+date is older, together with their records and, if unreferenced, blobs. A
+fully pruned failure-containing message also loses its documents. The mailbox
+remains the long-term archive.
 
 ## 7. Derived values
 
