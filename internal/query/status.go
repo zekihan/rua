@@ -64,24 +64,96 @@ func (svc *Service) loadMailboxes(
 	return rows, nil
 }
 
+// mailboxStatuses lists every stored mailbox plus any configured
+// mailbox that has no row yet (with null fields), sorted by name.
+func mailboxStatuses(mailboxes []mailboxDBRow, configured []string) []MailboxStatus {
+	configuredFlags := configuredSet(configured)
+	seen := make(map[string]bool, len(mailboxes))
+	statuses := make([]MailboxStatus, 0, len(mailboxes)+len(configured))
+
+	for index := range mailboxes {
+		row := &mailboxes[index]
+		seen[row.Name] = true
+		statuses = append(statuses, MailboxStatus{
+			Pending:        nil,
+			LastFetchStart: nullIntPtr(row.LastStart),
+			LastFetchEnd:   nullIntPtr(row.LastEnd),
+			LastSuccessAt:  nullIntPtr(row.LastSuccess),
+			Name:           row.Name,
+			LastResult:     row.LastResult,
+			LastError:      row.LastError,
+			UIDValidity:    uint32(row.UIDValidity), //nolint:gosec // Stored as non-negative.
+			NextUID:        uint32(row.NextUID),     //nolint:gosec // Stored as non-negative.
+			Configured:     configuredFlags[row.Name],
+		})
+	}
+
+	for _, name := range configured {
+		if seen[name] {
+			continue
+		}
+
+		seen[name] = true
+		statuses = append(statuses, MailboxStatus{
+			Pending:        nil,
+			LastFetchStart: nil,
+			LastFetchEnd:   nil,
+			LastSuccessAt:  nil,
+			Name:           name,
+			LastResult:     "",
+			LastError:      "",
+			UIDValidity:    0,
+			NextUID:        0,
+			Configured:     true,
+		})
+	}
+
+	slices.SortFunc(statuses, func(first, second MailboxStatus) int {
+		return strings.Compare(first.Name, second.Name)
+	})
+
+	return statuses
+}
+
+// staleState reports staleness over configured mailboxes only: rows
+// for mailboxes no longer configured are ignored, and a configured
+// mailbox with no row or no successful fetch yet counts as missing.
+// When no configured names are known, the stored rows are used.
 func staleState(
 	mailboxes []mailboxDBRow,
+	configured []string,
 	now time.Time,
 	staleAfter time.Duration,
 	enabled bool,
 ) (bool, *int64) {
+	byName := make(map[string]*mailboxDBRow, len(mailboxes))
+
+	for index := range mailboxes {
+		byName[mailboxes[index].Name] = &mailboxes[index]
+	}
+
+	names := configured
+	if len(names) == 0 {
+		names = make([]string, 0, len(mailboxes))
+
+		for index := range mailboxes {
+			names = append(names, mailboxes[index].Name)
+		}
+	}
+
 	var oldest *int64
 
 	hasMissing := false
 
-	for index := range mailboxes {
-		if !mailboxes[index].LastSuccess.Valid {
+	for _, name := range names {
+		row, ok := byName[name]
+		if !ok || !row.LastSuccess.Valid {
 			hasMissing = true
 
 			continue
 		}
 
-		value := mailboxes[index].LastSuccess.Int64
+		value := row.LastSuccess.Int64
 		if oldest == nil || value < *oldest {
 			copyValue := value
 			oldest = &copyValue
@@ -92,13 +164,23 @@ func staleState(
 		return false, oldest
 	}
 
-	if len(mailboxes) == 0 || hasMissing || oldest == nil {
+	if hasMissing || oldest == nil {
 		return true, oldest
 	}
 
 	threshold := now.Add(-staleAfter).Unix()
 
 	return *oldest < threshold, oldest
+}
+
+func configuredSet(configured []string) map[string]bool {
+	set := make(map[string]bool, len(configured))
+
+	for _, name := range configured {
+		set[name] = true
+	}
+
+	return set
 }
 
 // Status returns ingest state.
@@ -168,22 +250,11 @@ func (svc *Service) Status(ctx context.Context) (Status, error) {
 			return err
 		}
 
-		for index := range mailboxes {
-			row := &mailboxes[index]
-			status.Mailboxes = append(status.Mailboxes, MailboxStatus{
-				LastFetchStart: nullIntPtr(row.LastStart),
-				LastFetchEnd:   nullIntPtr(row.LastEnd),
-				LastSuccessAt:  nullIntPtr(row.LastSuccess),
-				Name:           row.Name,
-				LastResult:     row.LastResult,
-				LastError:      row.LastError,
-				UIDValidity:    uint32(row.UIDValidity), //nolint:gosec // Stored as non-negative.
-				NextUID:        uint32(row.NextUID),     //nolint:gosec // Stored as non-negative.
-			})
-		}
+		status.Mailboxes = mailboxStatuses(mailboxes, svc.deps.Mailboxes)
 
 		stale, lastSuccess := staleState(
 			mailboxes,
+			svc.deps.Mailboxes,
 			svc.now(),
 			svc.deps.StaleAfter,
 			svc.deps.IMAPEnabled,
@@ -496,6 +567,7 @@ func (svc *Service) CollectMetrics(ctx context.Context, metrics *telemetry.Metri
 
 		stale, lastSuccess := staleState(
 			mailboxes,
+			svc.deps.Mailboxes,
 			svc.now(),
 			svc.deps.StaleAfter,
 			svc.deps.IMAPEnabled,

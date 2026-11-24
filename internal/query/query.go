@@ -63,6 +63,9 @@ type Deps struct {
 	Reparsing   func() bool
 	EnrichQueue func() int
 	Now         func() time.Time
+	// Mailboxes are the configured IMAP mailbox names; only these count
+	// toward staleness.
+	Mailboxes   []string
 	StaleAfter  time.Duration
 	IMAPEnabled bool
 }
@@ -104,6 +107,8 @@ type gaugeKey struct {
 }
 
 // New returns a Service.
+//
+//nolint:gocritic // hugeParam: the exported constructor takes Deps by value.
 func New(deps Deps) *Service {
 	return &Service{deps: deps, gauges: map[gaugeKey]bool{}, gaugesMu: sync.Mutex{}}
 }

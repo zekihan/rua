@@ -147,6 +147,7 @@ func newFixture(t *testing.T, set *sources.Set) *fixture {
 	deps.Now = func() time.Time { return testNow }
 	deps.StaleAfter = 3 * time.Hour
 	deps.IMAPEnabled = true
+	deps.Mailboxes = []string{"INBOX"}
 
 	return &fixture{svc: New(deps), st: st}
 }
@@ -946,6 +947,62 @@ func TestStatusFreshAndMessageRaw(t *testing.T) {
 
 	_, _, err := fx.svc.MessageRaw(t.Context(), 4242)
 	eq(t, errors.Is(err, ErrNotFound), true)
+}
+
+func TestStatusStaleConfiguredOnly(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+	fresh := testNow.Add(-time.Hour).Unix()
+	old := testNow.Add(-10 * time.Hour).Unix()
+
+	fx.exec(
+		t,
+		`INSERT INTO mailboxes (name, uidvalidity, next_uid, last_success) VALUES ('INBOX', 1, 10, ?)`,
+		fresh,
+	)
+	fx.exec(
+		t,
+		`INSERT INTO mailboxes (name, uidvalidity, next_uid, last_success) VALUES ('Retired', 1, 10, ?)`,
+		old,
+	)
+
+	// The retired mailbox is listed but does not make the status stale.
+	status := statusFor(t, fx)
+	eq(t, status.Stale, false)
+	eq(t, len(status.Mailboxes), 2)
+	eq(t, status.Mailboxes[0].Name, "INBOX")
+	eq(t, status.Mailboxes[0].Configured, true)
+	eq(t, status.Mailboxes[1].Name, "Retired")
+	eq(t, status.Mailboxes[1].Configured, false)
+
+	// A configured mailbox with no row yet is stale and listed with nulls.
+	fx.svc.deps.Mailboxes = []string{"INBOX", "Reports"}
+
+	status = statusFor(t, fx)
+	eq(t, status.Stale, true)
+	eq(t, len(status.Mailboxes), 3)
+
+	var reports *MailboxStatus
+
+	for index := range status.Mailboxes {
+		if status.Mailboxes[index].Name == "Reports" {
+			reports = &status.Mailboxes[index]
+		}
+	}
+
+	eq(t, reports == nil, false)
+	eq(t, reports.Configured, true)
+	eq(t, reports.LastSuccessAt == nil, true)
+	eq(t, reports.Pending == nil, true)
+
+	// A configured row without a success is stale even beside a fresh one.
+
+	fx.exec(
+		t,
+		`INSERT INTO mailboxes (name, uidvalidity, next_uid) VALUES ('Reports', 1, 1)`,
+	)
+	eq(t, statusFor(t, fx).Stale, true)
 }
 
 func TestPolicyChangesIgnoreLaggingReportersAndDefaults(t *testing.T) {
