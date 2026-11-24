@@ -14,7 +14,8 @@
   --color-forwarded: var(--forwarded);
   --color-fail: var(--fail);
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --font-mono:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 :root {
@@ -23,7 +24,7 @@
   --surface: #ffffff;
   --surface-2: #eef2f7;
   --line: #dbe2ec;
-  --control: #8797aa;
+  --control: #718298;
   --ink: #18263a;
   --ink-2: #4d5f75;
   --accent: #205e99;
@@ -94,7 +95,7 @@
   }
 
   .input {
-    @apply block min-h-10 w-full min-w-0 rounded-md border border-control/65 bg-surface px-2.5 py-1.5 text-sm font-normal text-ink;
+    @apply block min-h-10 w-full min-w-0 rounded-md border border-control bg-surface px-2.5 py-1.5 text-sm font-normal text-ink;
   }
 
   .btn {
@@ -153,7 +154,7 @@
   }
 
   .mono {
-    @apply font-mono text-[0.86em] [overflow-wrap:anywhere];
+    @apply font-mono text-[0.9em] [overflow-wrap:anywhere];
   }
 
   .small {
