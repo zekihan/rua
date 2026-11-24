@@ -277,7 +277,12 @@ func (svc *Service) Status(ctx context.Context) (Status, error) {
 
 		status.Problems = problems
 
-		other, err := svc.loadMessages(ctx, tx, `class = 'other'`, nil)
+		other, err := svc.loadMessages(
+			ctx,
+			tx,
+			`class = 'other' AND status NOT IN ('error', 'partial', 'skipped')`,
+			nil,
+		)
 		if err != nil {
 			return err
 		}
