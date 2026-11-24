@@ -36,12 +36,16 @@ import (
 
 const (
 	readHeaderTimeout = 10 * time.Second
-	idleTimeout       = 120 * time.Second
-	shutdownTimeout   = 10 * time.Second
-	metricsInterval   = time.Minute
-	pruneInterval     = 24 * time.Hour
-	reparseRetry      = 15 * time.Minute
-	exitUsage         = 2
+	readTimeout       = 30 * time.Second
+	// The largest response is a stored message download (up to the
+	// 200 MiB extraction budget); allow it on a slow link.
+	writeTimeout    = 5 * time.Minute
+	idleTimeout     = 120 * time.Second
+	shutdownTimeout = 10 * time.Second
+	metricsInterval = time.Minute
+	pruneInterval   = 24 * time.Hour
+	reparseRetry    = 15 * time.Minute
+	exitUsage       = 2
 )
 
 const usage = `Usage: rua [command] [arguments]
@@ -335,6 +339,8 @@ func listen(
 	)
 	httpServer.ReadHeaderTimeout = readHeaderTimeout
 	httpServer.IdleTimeout = idleTimeout
+	httpServer.ReadTimeout = readTimeout
+	httpServer.WriteTimeout = writeTimeout
 
 	slog.InfoContext(ctx, "Listening", slog.String("addr", cfg.ListenAddr))
 
