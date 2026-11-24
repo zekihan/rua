@@ -59,16 +59,24 @@ func (pipe *Pipeline) Ingest(ctx context.Context, raw []byte, src Source) (Resul
 			entity, headerErr = message.Read(bytes.NewReader(raw))
 		}
 
-		if len(raw) <= MaxMessageBytes {
-			var err error
+		err := parseMessage(ctx, tx, state, raw, entity, headerErr)
+		if err != nil {
+			return nil, nil, err
+		}
 
-			blob, err = store.PutBlob(ctx, tx, raw)
+		if len(raw) <= MaxMessageBytes {
+			stored := raw
+			if state.result.Class == report.ClassFailure {
+				stored = sanitizeFailureMessage(raw)
+			}
+
+			blob, err = store.PutBlob(ctx, tx, stored)
 			if err != nil {
 				return nil, nil, fmt.Errorf("save raw message: %w", err)
 			}
 		}
 
-		return blob, entity, parseMessage(ctx, tx, state, raw, entity, headerErr)
+		return blob, entity, nil
 	})
 }
 

@@ -351,6 +351,108 @@ func TestOtherFailureAndSkip(t *testing.T) {
 	}
 }
 
+func storedMessageBlob(t *testing.T, st *store.Store, id int64) []byte {
+	t.Helper()
+
+	var blob []byte
+
+	err := st.Read(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		var digest []byte
+
+		err := tx.GetContext(ctx, &digest, "SELECT blob FROM messages WHERE id=?", id)
+		if err != nil {
+			return err
+		}
+
+		blob, err = store.GetBlob(ctx, tx, digest)
+
+		return err
+	})
+	mustSucceed(t, err)
+
+	return blob
+}
+
+func failureMessageFixture() []byte {
+	feedback := "Feedback-Type: auth-failure\r\nVersion: 1\r\nAuth-Failure: dmarc\r\n" +
+		"Arrival-Date: Mon, 1 Jan 2024 01:02:03 +0000\r\nSource-IP: 198.51.100.10\r\n" +
+		"Reported-Domain: example.com\r\n"
+	original := "From: sender@example.com\r\nTo: recipient@example.net\r\n" +
+		"Subject: original\r\n\r\nprivate original body"
+
+	return []byte("From: reporter@example.net\r\nSubject: failure report\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		multipart("report; report-type=feedback-report", "fb",
+			"Content-Type: text/plain\r\n\r\nhuman secret explanation",
+			"Content-Type: message/feedback-report\r\n\r\n"+feedback,
+			"Content-Type: message/rfc822\r\n\r\n"+original))
+}
+
+func TestFailureBlobSanitized(t *testing.T) {
+	pipe, st := fixtureStore(t, defaultOptions())
+	raw := failureMessageFixture()
+
+	result := mustIngest(t, pipe, raw)
+	assertEqual(t, result.Class, report.ClassFailure)
+	assertEqual(t, result.Status, StatusOK)
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM failure_reports"), 1)
+	assertEqual(t, scalar[string](t, st, "SELECT orig_subject FROM failure_reports"), "original")
+
+	blob := storedMessageBlob(t, st, result.MessageID)
+	if bytes.Contains(blob, []byte("private original body")) ||
+		bytes.Contains(blob, []byte("human secret")) {
+		t.Fatalf("stored failure blob leaks body: %q", blob)
+	}
+
+	if !bytes.Contains(blob, []byte("Feedback-Type: auth-failure")) ||
+		!bytes.Contains(blob, []byte("Subject: original")) {
+		t.Fatalf("stored failure blob lost headers: %q", blob)
+	}
+
+	rawDigest := store.Digest(raw)
+	assertEqual(
+		t,
+		scalar[bool](t, st, "SELECT EXISTS(SELECT 1 FROM messages WHERE id=? AND sha256=?)",
+			result.MessageID, rawDigest),
+		true,
+	)
+	// Dedup still recognises a refetch of the raw bytes.
+	again := mustIngest(t, pipe, raw)
+	if !again.Known {
+		t.Fatalf("refetch of failure message not recognised: %+v", again)
+	}
+
+	// Simulate pre-fix stored data: restore the raw blob, then reparse.
+	err := st.Write(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		digest, err := store.PutBlob(ctx, tx, raw)
+		if err != nil {
+			return err
+		}
+
+		_, err = tx.ExecContext(ctx, "UPDATE messages SET blob=? WHERE id=?", digest, result.MessageID)
+
+		return err
+	})
+	mustSucceed(t, err)
+
+	_, err = pipe.Reparse(t.Context())
+	mustSucceed(t, err)
+
+	blob = storedMessageBlob(t, st, result.MessageID)
+	if bytes.Contains(blob, []byte("private original body")) ||
+		bytes.Contains(blob, []byte("human secret")) {
+		t.Fatalf("reparse did not sanitize failure blob: %q", blob)
+	}
+
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM failure_reports"), 1)
+	assertEqual(t, scalar[string](t, st, "SELECT orig_subject FROM failure_reports"), "original")
+	assertEqual(
+		t,
+		scalar[int](t, st, "SELECT count(*) FROM blobs WHERE sha256=?", rawDigest),
+		0,
+	)
+}
+
 func TestSkipIdenticalHeaders(t *testing.T) {
 	fakeParsers(t)
 

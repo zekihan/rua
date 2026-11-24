@@ -6,7 +6,7 @@ package report
 // ParserVersion identifies the classification, extraction and parsing
 // behavior. Bump it whenever any of them changes so stored blobs are
 // reparsed.
-const ParserVersion = 1
+const ParserVersion = 2
 
 // Class is the classification of a whole message.
 type Class string

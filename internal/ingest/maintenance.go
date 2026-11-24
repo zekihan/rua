@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -159,9 +160,21 @@ func rebuildMessage(
 		return false, err
 	}
 
+	blob := digest
+
+	if state.result.Class == report.ClassFailure {
+		sanitized := sanitizeFailureMessage(raw)
+		if !bytes.Equal(sanitized, raw) {
+			blob, err = store.PutBlob(ctx, tx, sanitized)
+			if err != nil {
+				return false, fmt.Errorf("save sanitized failure message: %w", err)
+			}
+		}
+	}
+
 	_, err = tx.ExecContext(ctx, `UPDATE messages
-		SET class = ?, status = ?, error = ?, parser_version = ? WHERE id = ?`,
-		state.result.Class, state.result.Status, state.messageError, report.ParserVersion, id)
+		SET blob = ?, class = ?, status = ?, error = ?, parser_version = ? WHERE id = ?`,
+		blob, state.result.Class, state.result.Status, state.messageError, report.ParserVersion, id)
 	if err != nil {
 		return false, fmt.Errorf("update reparsed message: %w", err)
 	}
