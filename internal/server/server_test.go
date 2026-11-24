@@ -282,6 +282,41 @@ func TestServerRawAndErrors(t *testing.T) {
 	checkHeaders(t, health)
 }
 
+func TestReportersRoute(t *testing.T) {
+	t.Parallel()
+
+	env := newEnv(t, fetcherWith(imapsrc.ErrDisabled))
+
+	rec := env.do(t, http.MethodGet, "/api/reporters?from=2025-06-01&to=2025-06-15&tz=UTC", nil)
+	eq(t, rec.Code, http.StatusOK)
+	eq(t, rec.Header().Get("Cache-Control"), "no-store")
+	checkHeaders(t, rec)
+
+	body := decodeJSON[query.ReportersResponse](t, rec)
+	eq(t, body.Range.From, "2025-06-01")
+	eq(t, len(body.Reporters), 1)
+	eq(t, body.Reporters[0].Org, "Google")
+	eq(t, body.Reporters[0].Reports, int64(1))
+	eq(t, body.Reporters[0].Messages, int64(10))
+	eqSliceServer(t, body.Reporters[0].Domains, []string{"example.com"})
+
+	eq(t, env.do(t, http.MethodGet, "/api/reporters?tz=Local", nil).Code, http.StatusBadRequest)
+}
+
+func eqSliceServer[T comparable](t *testing.T, got, want []T) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+
+	for index := range got {
+		if got[index] != want[index] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
 func TestFetchAccepted(t *testing.T) {
 	t.Parallel()
 

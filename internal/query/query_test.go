@@ -1005,6 +1005,64 @@ func TestStatusStaleConfiguredOnly(t *testing.T) {
 	eq(t, statusFor(t, fx).Stale, true)
 }
 
+func TestReporters(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+	fx.ingest(t, aggregateXML("Google", "rep-g1", "example.com",
+		unixTime(2025, time.June, 9, 0), unixTime(2025, time.June, 11, 0), "reject", 100,
+		"192.0.2.1", 10, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+	fx.ingest(t, aggregateXML("Google", "rep-g2", "example.com",
+		unixTime(2025, time.June, 11, 0), unixTime(2025, time.June, 13, 0), "reject", 100,
+		"192.0.2.1", 5, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+	fx.ingest(t, aggregateXML("Google", "rep-g3", "other.com",
+		unixTime(2025, time.June, 11, 0), unixTime(2025, time.June, 13, 0), "reject", 100,
+		"192.0.2.1", 3, "pass", "fail", "none", "other.com", "other.com", "pass", "s1", ""))
+	fx.ingest(t, aggregateXML("OldReporter", "rep-old", "example.com",
+		unixTime(2025, time.May, 1, 0), unixTime(2025, time.May, 2, 0), "reject", 100,
+		"192.0.2.1", 2, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+	fx.ingest(t, aggregateXML("RecentReporter", "rep-recent", "example.com",
+		unixTime(2025, time.June, 13, 0), unixTime(2025, time.June, 14, 0), "reject", 100,
+		"192.0.2.1", 4, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+
+	response, err := fx.svc.Reporters(
+		t.Context(), fx.filter(t, "from=2025-06-01&to=2025-06-15&tz=UTC"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eq(t, response.Range.From, "2025-06-01")
+	eq(t, len(response.Reporters), 3)
+
+	// Quiet first, then most recent last report.
+	eq(t, response.Reporters[0].Org, "OldReporter")
+	eq(t, response.Reporters[0].Quiet, true)
+	eq(t, response.Reporters[0].Reports, int64(0))
+	eq(t, response.Reporters[0].Messages, int64(0))
+	eq(t, response.Reporters[1].Org, "RecentReporter")
+	eq(t, response.Reporters[1].Quiet, false)
+	eq(t, response.Reporters[2].Org, "Google")
+	eq(t, response.Reporters[2].Reports, int64(3))
+	eq(t, response.Reporters[2].Messages, int64(18))
+	eq(t, response.Reporters[2].FirstReportAt, unixTime(2025, time.June, 11, 0))
+	eq(t, response.Reporters[2].LastReportAt, unixTime(2025, time.June, 13, 0))
+	eqSlice(t, response.Reporters[2].Domains, []string{"example.com", "other.com"})
+
+	filtered, err := fx.svc.Reporters(
+		t.Context(), fx.filter(t, "domain=example.com&from=2025-06-01&to=2025-06-15&tz=UTC"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eq(t, len(filtered.Reporters), 3)
+	eq(t, filtered.Reporters[2].Org, "Google")
+	eq(t, filtered.Reporters[2].Reports, int64(2))
+	eq(t, filtered.Reporters[2].Messages, int64(15))
+	eqSlice(t, filtered.Reporters[2].Domains, []string{"example.com"})
+}
+
 func TestStatusMailboxPending(t *testing.T) {
 	t.Parallel()
 

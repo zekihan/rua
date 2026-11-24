@@ -688,12 +688,7 @@ func sortNewSources(rows []NewSource) {
 func (svc *Service) quietReporters(
 	ctx context.Context, tx *sqlx.Tx, rng *resolvedRange, domain string,
 ) ([]QuietReporter, error) {
-	cutoff := rng.toUnix
-	if nowUnix := svc.now().Unix(); nowUnix < cutoff {
-		cutoff = nowUnix
-	}
-
-	threshold := cutoff - quietDays*daySeconds
+	threshold := svc.quietThreshold(rng)
 
 	query := `SELECT org AS org, MIN(end) AS first_end, MAX(end) AS last_end FROM reports
 		WHERE duplicate_of IS NULL AND kind = 'dmarc-aggregate'`
@@ -722,7 +717,7 @@ func (svc *Service) quietReporters(
 
 	for index := range rows {
 		row := &rows[index]
-		if row.FirstEnd >= rng.fromUnix || row.LastEnd >= threshold {
+		if !quietByRule(row.FirstEnd, row.LastEnd, rng.fromUnix, threshold) {
 			continue
 		}
 
