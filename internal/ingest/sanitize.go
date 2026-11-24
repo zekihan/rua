@@ -7,180 +7,411 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"mime"
+	"mime/quotedprintable"
+	"slices"
 	"strings"
-
-	"github.com/zekihan/rua/internal/report"
 )
 
-const (
-	sanitizedBoundaryBase = "rua-failure-report"
-	mixedBoundaryBase     = "rua-mixed-report"
-)
-
-// sanitizeFailureMessage builds the stored form of a dmarc-failure message
-// from the failure documents the extraction recognized (DESIGN.md section 3:
-// headers only). The result is a fresh RFC 5322 message carrying the original
-// outer header fields and, per failure found, a message/feedback-report part
-// with only the feedback field block plus a text/rfc822-headers part with
-// only the original message's header block, all under one
-// multipart/report; report-type=feedback-report. Human-readable parts and
-// original-message bodies never reach the stored blob, however deeply the
-// report was nested, and the result reparses to the same failure_reports
-// rows. The caller keeps messages.sha256 as the digest of the raw bytes.
-func sanitizeFailureMessage(raw []byte, failures []document) []byte {
-	return sanitizeMessage(raw, failures, nil, failures)
-}
-
-// sanitizeMessage is sanitizeFailureMessage plus every recognized
-// aggregate/TLS document, for messages that mix failure content with other
-// reports. Each report document is stored as its own base64 attachment
-// holding the exact extracted bytes, so a reparse yields the same rows.
-// Ordered preserves the extraction order so the message class is stable.
-func sanitizeMessage(
-	raw []byte, failures, reports, ordered []document,
-) []byte {
-	if len(failures) == 0 && len(reports) == 0 {
-		return headerBlock(raw)
-	}
-
-	if len(reports) == 0 {
-		return buildFailureMessage(raw, failures)
-	}
-
-	if len(ordered) == 0 {
-		ordered = append(append([]document{}, failures...), reports...)
-	}
-
-	return buildMixedMessage(raw, failures, reports, ordered)
-}
-
-func buildFailureMessage(raw []byte, failures []document) []byte {
-	outer := filteredOuterHeaders(raw)
-	boundary := sanitizedBoundary(outer, failures, nil)
-
+// sanitizeMessage builds the stored form of a message that contains failure
+// content (DESIGN.md section 3: headers only). It walks the original MIME
+// tree and copies every leaf part that is not inside a failure report
+// verbatim, still transfer-encoded and still compressed, so the stored copy
+// is never materially larger than the raw message and a reparse sees exactly
+// the same parts (including attachments that failed to parse). Each
+// multipart/report; report-type=feedback-report subtree is replaced by the
+// sanitized pair: message/feedback-report holding only the feedback fields,
+// plus text/rfc822-headers holding only the original message's header block.
+// The caller keeps messages.sha256 as the digest of the raw bytes.
+func sanitizeMessage(raw []byte) []byte {
 	var out bytes.Buffer
 
-	out.Write(outer)
-	out.WriteString("MIME-Version: 1.0\r\n")
-	fmt.Fprintf(
-		&out,
-		"Content-Type: multipart/report; report-type=\"feedback-report\"; boundary=%q\r\n\r\n",
-		boundary,
-	)
-
-	for _, failure := range failures {
-		writeStoredPart(&out, boundary, typeFeedback, feedbackFieldBlock(failure.data))
-		writeStoredPart(&out, boundary, typeOriginalHeaders, headerOnly(failure.originalHeaders))
-	}
-
-	fmt.Fprintf(&out, "--%s--\r\n", boundary)
+	writeEntity(&out, raw, 0)
 
 	return out.Bytes()
 }
 
-func buildMixedMessage(
-	raw []byte, failures, reports, ordered []document,
-) []byte {
-	outer := filteredOuterHeaders(raw)
-	mixedBoundary := chooseBoundary(mixedBoundaryBase, outer, failures, reports)
-	reportBoundary := chooseBoundary(sanitizedBoundaryBase, outer, failures, reports)
+// sanitizeFailureMessage sanitizes a message known to hold failure content.
+// The extracted failure documents are no longer needed: the walker finds
+// each failure subtree in the raw tree itself.
+func sanitizeFailureMessage(raw []byte, _ []document) []byte {
+	return sanitizeMessage(raw)
+}
 
-	var out bytes.Buffer
+type mimePart struct { //nolint:govet // Header, body, type: logical grouping.
+	header []byte
+	body   []byte
+	media  string
+	params map[string]string
+}
 
-	out.Write(outer)
-	out.WriteString("MIME-Version: 1.0\r\n")
-	fmt.Fprintf(&out, "Content-Type: multipart/mixed; boundary=%q\r\n\r\n", mixedBoundary)
+func parsePart(raw []byte) mimePart {
+	part := mimePart{
+		header: nil, body: nil, media: "", params: map[string]string{},
+	}
 
-	for _, doc := range ordered {
-		if doc.class == report.ClassFailure {
-			fmt.Fprintf(
-				&out,
-				"--%s\r\nContent-Type: multipart/report; "+
-					"report-type=\"feedback-report\"; boundary=%q\r\n\r\n",
-				mixedBoundary, reportBoundary,
-			)
-			writeStoredPart(
-				&out, reportBoundary, typeFeedback, feedbackFieldBlock(doc.data),
-			)
-			writeStoredPart(
-				&out, reportBoundary, typeOriginalHeaders, headerOnly(doc.originalHeaders),
-			)
-			fmt.Fprintf(&out, "--%s--\r\n", reportBoundary)
+	index, length := headerSeparator(raw)
+	if index < 0 {
+		part.header = raw
+
+		return part
+	}
+
+	part.header = raw[:index+length]
+	part.body = raw[index+length:]
+
+	contentType := headerFieldValue(part.header, "Content-Type")
+	if contentType == "" {
+		return part
+	}
+
+	media, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		part.media = strings.ToLower(
+			strings.TrimSpace(strings.Split(contentType, ";")[0]),
+		)
+
+		return part
+	}
+
+	part.media = strings.ToLower(media)
+	part.params = params
+
+	return part
+}
+
+func headerSeparator(data []byte) (int, int) {
+	best, bestLen := -1, 0
+
+	for _, sep := range []string{"\r\n\r\n", "\n\n", "\r\n\n", "\n\r\n"} {
+		if index := bytes.Index(data, []byte(sep)); index >= 0 &&
+			(best < 0 || index < best) {
+			best, bestLen = index, len(sep)
+		}
+	}
+
+	return best, bestLen
+}
+
+func (part *mimePart) isMultipart() bool {
+	return strings.HasPrefix(part.media, "multipart/") && part.params["boundary"] != ""
+}
+
+func (part *mimePart) isFeedbackReport() bool {
+	return part.media == "multipart/report" &&
+		strings.EqualFold(part.params["report-type"], "feedback-report")
+}
+
+func writeEntity(out *bytes.Buffer, raw []byte, depth int) {
+	part := parsePart(raw)
+
+	if !part.isMultipart() {
+		out.Write(part.header)
+		out.Write(part.body)
+
+		return
+	}
+
+	if depth >= maxMIMEDepth {
+		// Keep only the multipart header: a reparse still reaches this
+		// multipart at the same depth and records the depth error, but no
+		// body below it is stored.
+		out.Write(part.header)
+
+		return
+	}
+
+	if part.isFeedbackReport() {
+		writeFailureReport(out, &part)
+
+		return
+	}
+
+	// Keep the original boundary: it already delimits the copied bodies,
+	// and reusing it makes sanitizing a sanitized message a no-op.
+	boundary := part.params["boundary"]
+	writeMultipartHeader(out, &part, boundary)
+
+	for _, child := range splitMultipart(part.body, boundary) {
+		fmt.Fprintf(out, "--%s\r\n", boundary)
+		writeEntity(out, child, depth+1)
+		out.WriteString("\r\n")
+	}
+
+	fmt.Fprintf(out, "--%s--\r\n", boundary)
+}
+
+func writeFailureReport(out *bytes.Buffer, part *mimePart) {
+	boundary := part.params["boundary"]
+	writeMultipartHeader(out, part, boundary)
+
+	collector := &failureCollector{
+		done: nil, current: failurePair{feedback: nil, headers: nil}, has: false,
+	}
+	collector.walk(part)
+
+	for _, pair := range collector.pairs() {
+		writeStoredPart(out, boundary, typeFeedback, feedbackFieldBlock(pair.feedback))
+		writeStoredPart(
+			out, boundary, typeOriginalHeaders, headerOnly(pair.headers),
+		)
+	}
+
+	fmt.Fprintf(out, "--%s--\r\n", boundary)
+}
+
+// writeMultipartHeader copies the original header fields except
+// Content-Type, then writes a fresh Content-Type carrying the original
+// parameters (report-type included) with the new boundary.
+func writeMultipartHeader(out *bytes.Buffer, part *mimePart, boundary string) {
+	for _, field := range headerFields(part.header) {
+		name, _, found := strings.Cut(field[0], ":")
+		if found && strings.EqualFold(name, "Content-Type") {
+			continue
+		}
+
+		for _, line := range field {
+			out.WriteString(line)
+			out.WriteString("\r\n")
+		}
+	}
+
+	params := make([]string, 0, len(part.params))
+
+	for _, key := range slices.Sorted(maps.Keys(part.params)) {
+		if key != "boundary" {
+			params = append(params, fmt.Sprintf("%s=%q", key, part.params[key]))
+		}
+	}
+
+	contentType := part.media
+	if len(params) > 0 {
+		contentType += "; " + strings.Join(params, "; ")
+	}
+
+	fmt.Fprintf(out, "Content-Type: %s; boundary=%q\r\n\r\n", contentType, boundary)
+}
+
+type failurePair struct {
+	feedback []byte
+	headers  []byte
+}
+
+type failureCollector struct {
+	done    []failurePair
+	current failurePair
+	has     bool
+}
+
+func (collector *failureCollector) pairs() []failurePair {
+	collector.flush()
+
+	return collector.done
+}
+
+func (collector *failureCollector) flush() {
+	if !collector.has {
+		return
+	}
+
+	collector.done = append(collector.done, collector.current)
+	collector.current = failurePair{feedback: nil, headers: nil}
+	collector.has = false
+}
+
+func (collector *failureCollector) walk(part *mimePart) {
+	for _, childRaw := range splitMultipart(part.body, part.params["boundary"]) {
+		child := parsePart(childRaw)
+		collector.walkPart(&child)
+	}
+}
+
+func (collector *failureCollector) walkPart(part *mimePart) {
+	switch {
+	case part.media == typeFeedback:
+		if collector.has {
+			collector.flush()
+		}
+
+		if data, ok := decodedPartBody(part); ok {
+			collector.current.feedback = data
+			collector.has = len(data) > 0
+		}
+	case part.media == typeOriginal || part.media == typeOriginalHeaders:
+		if data, ok := decodedPartBody(part); ok {
+			collector.current.headers = headerOnly(data)
+		}
+	case part.isMultipart():
+		collector.walk(part)
+	default:
+		// Human-readable and any other part inside a failure report is
+		// dropped.
+	}
+}
+
+func decodedPartBody(part *mimePart) ([]byte, bool) {
+	encoding := strings.ToLower(headerFieldValue(part.header, "Content-Transfer-Encoding"))
+
+	switch encoding {
+	case "base64":
+		data, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(part.body)))
+		if err != nil {
+			return nil, false
+		}
+
+		return data, true
+	case "quoted-printable":
+		data, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(part.body)))
+		if err != nil {
+			return nil, false
+		}
+
+		return data, true
+	default:
+		return part.body, true
+	}
+}
+
+func headerFieldValue(header []byte, name string) string {
+	for _, field := range headerFields(header) {
+		fieldName, value, found := strings.Cut(field[0], ":")
+		if !found || !strings.EqualFold(fieldName, name) {
+			continue
+		}
+
+		lines := append([]string{strings.TrimSpace(value)}, field[1:]...)
+
+		return strings.Join(lines, " ")
+	}
+
+	return ""
+}
+
+// splitMultipart splits a multipart body into its raw part segments, each
+// holding the part's headers and body exactly as received. The CRLF before
+// a delimiter belongs to the delimiter, not the preceding part. A missing
+// closing delimiter (truncated input) ends the last part at EOF.
+func splitMultipart(body []byte, boundary string) [][]byte {
+	delimiters := findDelimiters(body, boundary)
+	if len(delimiters) == 0 {
+		return nil
+	}
+
+	var parts [][]byte
+
+	for index, delimiter := range delimiters {
+		if delimiter.closing {
+			break
+		}
+
+		end := len(body)
+		if index+1 < len(delimiters) {
+			end = contentEnd(body, delimiters[index+1].start)
+		}
+
+		start := min(delimiter.lineEnd, end)
+		parts = append(parts, body[start:end])
+	}
+
+	return parts
+}
+
+func contentEnd(body []byte, delimiterStart int) int {
+	if delimiterStart >= len("\r\n") &&
+		bytes.Equal(body[delimiterStart-len("\r\n"):delimiterStart], []byte("\r\n")) {
+		return delimiterStart - len("\r\n")
+	}
+
+	if delimiterStart >= 1 && body[delimiterStart-1] == '\n' {
+		return delimiterStart - 1
+	}
+
+	return delimiterStart
+}
+
+type delimiter struct {
+	start   int
+	lineEnd int
+	closing bool
+}
+
+func findDelimiters(body []byte, boundary string) []delimiter {
+	marker := []byte("--" + boundary)
+
+	var found []delimiter
+
+	for offset := 0; offset < len(body); {
+		index := bytes.Index(body[offset:], marker)
+		if index < 0 {
+			break
+		}
+
+		index += offset
+
+		candidate, ok := delimiterAt(body, index, marker)
+		if ok {
+			found = append(found, candidate)
+			if candidate.closing {
+				break
+			}
+
+			offset = candidate.lineEnd
 
 			continue
 		}
 
-		writeReportPart(&out, mixedBoundary, doc)
+		offset = index + len(marker)
 	}
 
-	fmt.Fprintf(&out, "--%s--\r\n", mixedBoundary)
-
-	return out.Bytes()
+	return found
 }
 
-func writeReportPart(out *bytes.Buffer, boundary string, doc document) {
-	mediaType := "application/xml"
-	if doc.class == report.ClassTLS {
-		mediaType = typeTLSJSON
+func delimiterAt(body []byte, start int, marker []byte) (delimiter, bool) {
+	none := delimiter{start: 0, lineEnd: 0, closing: false}
+	if start > 0 && body[start-1] != '\n' {
+		return none, false
 	}
 
-	fmt.Fprintf(
-		out,
-		"--%s\r\nContent-Type: %s\r\nContent-Transfer-Encoding: base64\r\n"+
-			"Content-Disposition: attachment\r\n\r\n",
-		boundary, mediaType,
-	)
+	position, closing := afterMarker(body, start+len(marker))
 
-	encoded := base64.StdEncoding.EncodeToString(doc.data)
-	for len(encoded) > 76 {
-		out.WriteString(encoded[:76])
-		out.WriteString("\r\n")
-
-		encoded = encoded[76:]
+	lineEnd, ok := delimiterLineEnd(body, position)
+	if !ok {
+		return none, false
 	}
 
-	out.WriteString(encoded)
-	out.WriteString("\r\n")
+	return delimiter{start: start, lineEnd: lineEnd, closing: closing}, true
 }
 
-func sanitizedBoundary(outer []byte, failures, reports []document) string {
-	return chooseBoundary(sanitizedBoundaryBase, outer, failures, reports)
+// afterMarker skips transport padding and a closing "--", if present.
+func afterMarker(body []byte, position int) (int, bool) {
+	position = skipPadding(body, position)
+	if position+1 >= len(body) || body[position] != '-' || body[position+1] != '-' {
+		return position, false
+	}
+
+	return skipPadding(body, position+len("--")), true
 }
 
-func chooseBoundary(
-	base string, outer []byte, failures, reports []document,
-) string {
-	boundary := base
-	for boundaryInUse(boundary, outer, failures, reports) {
-		boundary += "-x"
+func skipPadding(body []byte, position int) int {
+	for position < len(body) && (body[position] == ' ' || body[position] == '\t') {
+		position++
 	}
 
-	return boundary
+	return position
 }
 
-func boundaryInUse(
-	boundary string, outer []byte, failures, reports []document,
-) bool {
-	needle := []byte(boundary)
-	if bytes.Contains(outer, needle) {
-		return true
+func delimiterLineEnd(body []byte, position int) (int, bool) {
+	switch {
+	case position >= len(body):
+		return len(body), true
+	case body[position] == '\n':
+		return position + 1, true
+	case body[position] == '\r' && position+1 < len(body) && body[position+1] == '\n':
+		return position + len("\r\n"), true
+	default:
+		return 0, false
 	}
-
-	for _, failure := range failures {
-		if bytes.Contains(feedbackFieldBlock(failure.data), needle) ||
-			bytes.Contains(headerOnly(failure.originalHeaders), needle) {
-			return true
-		}
-	}
-
-	for _, doc := range reports {
-		if bytes.Contains(doc.data, needle) ||
-			bytes.Contains([]byte(base64.StdEncoding.EncodeToString(doc.data)), needle) {
-			return true
-		}
-	}
-
-	return false
 }
 
 func writeStoredPart(out *bytes.Buffer, boundary, mediaType string, body []byte) {
@@ -211,38 +442,6 @@ func headerOnly(data []byte) []byte {
 	}
 
 	return block
-}
-
-var storedOuterHeaders = []string{"From", "To", "Subject", "Date", "Message-ID"}
-
-// filteredOuterHeaders returns the allowlisted fields of the raw message's
-// outer header block, with their original lines (including folding) kept.
-func filteredOuterHeaders(raw []byte) []byte {
-	var out bytes.Buffer
-
-	for _, field := range headerFields(headerBlock(raw)) {
-		name, _, found := strings.Cut(field[0], ":")
-		if !found || !isStoredOuterHeader(name) {
-			continue
-		}
-
-		for _, line := range field {
-			out.WriteString(line)
-			out.WriteString("\r\n")
-		}
-	}
-
-	return out.Bytes()
-}
-
-func isStoredOuterHeader(name string) bool {
-	for _, allowed := range storedOuterHeaders {
-		if strings.EqualFold(name, allowed) {
-			return true
-		}
-	}
-
-	return false
 }
 
 // headerFields splits a header block into fields, each a slice of lines

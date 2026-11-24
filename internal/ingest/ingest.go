@@ -16,10 +16,14 @@ import (
 
 // Extraction limits (DESIGN.md section 5).
 const (
-	MaxReportBytes  = 50 << 20  // decompressed bytes per report document
-	MaxMessageBytes = 200 << 20 // decompressed bytes per message, all parts
-	MaxZipEntries   = 20
+	MaxReportBytes = 50 << 20 // decompressed bytes per report document
+	MaxZipEntries  = 20
 )
+
+// MaxMessageBytes is the decompressed budget per message, all parts. It is
+// a variable so tests can reproduce budget-boundary failures with a reduced
+// limit instead of a 200 MiB fixture.
+var MaxMessageBytes = 200 << 20
 
 // Message statuses.
 const (

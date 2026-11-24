@@ -541,12 +541,16 @@ func TestFailureBlobNestedTrailingAndMultiple(t *testing.T) {
 	}
 
 	blob := storedMessageBlob(t, st, result.MessageID)
-	for _, marker := range []string{
-		"trailing feedback secret", "private original body", "human secret explanation",
-	} {
+	for _, marker := range []string{"trailing feedback secret", "private original body"} {
 		if bytes.Contains(blob, []byte(marker)) {
 			t.Fatalf("stored failure blob leaks %q: %q", marker, blob)
 		}
+	}
+
+	// Text outside a failure report is not privacy-sensitive and is copied
+	// verbatim under the new design.
+	if !bytes.Contains(blob, []byte("human secret explanation")) {
+		t.Fatalf("stored failure blob dropped sibling text part: %q", blob)
 	}
 
 	if !bytes.Contains(blob, []byte("Subject: failure report")) ||
@@ -608,6 +612,8 @@ func mixedFailurePart() string {
 
 type mixedSnapshot struct {
 	class     string
+	status    string
+	errorText string
 	failures  []storedFailureRow
 	reportIDs []int64
 	records   int
@@ -621,6 +627,10 @@ func snapshotMixed(t *testing.T, st *store.Store, messageID int64) mixedSnapshot
 	var snap mixedSnapshot
 
 	snap.class = scalar[string](t, st, "SELECT class FROM messages WHERE id=?", messageID)
+	snap.status = scalar[string](t, st, "SELECT status FROM messages WHERE id=?", messageID)
+	snap.errorText = scalar[string](
+		t, st, "SELECT coalesce(error,'') FROM messages WHERE id=?", messageID,
+	)
 	snap.failures = storedFailureRows(t, st)
 	snap.reports = scalar[int](t, st, "SELECT count(*) FROM reports")
 	snap.records = scalar[int](t, st, "SELECT count(*) FROM records")
@@ -639,6 +649,18 @@ func snapshotMixed(t *testing.T, st *store.Store, messageID int64) mixedSnapshot
 	mustSucceed(t, err)
 
 	return snap
+}
+
+func assertMixedSame(t *testing.T, before, after *mixedSnapshot) {
+	t.Helper()
+
+	if after.class != before.class || after.status != before.status ||
+		after.errorText != before.errorText || after.reports != before.reports ||
+		after.records != before.records || after.tlsPols != before.tlsPols ||
+		!slices.Equal(after.reportIDs, before.reportIDs) ||
+		!slices.Equal(after.failures, before.failures) {
+		t.Fatalf("reparse changed message:\nbefore %+v\nafter %+v", before, after)
+	}
 }
 
 func TestMixedFailureAndReportBothOrders(t *testing.T) {
@@ -709,12 +731,7 @@ func TestMixedFailureAndReportBothOrders(t *testing.T) {
 			mustSucceed(t, err)
 
 			after := snapshotMixed(t, st, result.MessageID)
-			if after.class != before.class || after.reports != before.reports ||
-				after.records != before.records || after.tlsPols != before.tlsPols ||
-				!slices.Equal(after.reportIDs, before.reportIDs) ||
-				!slices.Equal(after.failures, before.failures) {
-				t.Fatalf("reparse changed mixed rows:\nbefore %+v\nafter %+v", before, after)
-			}
+			assertMixedSame(t, &before, &after)
 
 			if reparsed := storedMessageBlob(t, st, result.MessageID); !bytes.Equal(
 				reparsed, blob,
@@ -722,6 +739,155 @@ func TestMixedFailureAndReportBothOrders(t *testing.T) {
 				t.Fatalf("sanitized mixed blob not stable:\n%q\nwant:\n%q", reparsed, blob)
 			}
 		})
+	}
+}
+
+// Finding B: a report attachment that failed extraction must survive
+// sanitizing, so a reparse records the same class, status and error instead
+// of erasing the failure and reclassifying the message as a clean failure
+// report.
+func TestMalformedGzipPlusFailureSurvivesReparse(t *testing.T) {
+	pipe, st := fixtureStore(t, defaultOptions())
+
+	malformed := attachment(typeTLSGzip, []byte{0x1f, 0x8b, 0x08, 0x00, 0xff})
+	raw := []byte("From: reporter@example.net\r\nSubject: mixed bad gzip\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		multipart("mixed", "outer", malformed, mixedFailurePart()))
+
+	result := mustIngest(t, pipe, raw)
+	assertEqual(t, result.Class, report.ClassTLS)
+	assertEqual(t, result.Status, StatusPartial)
+
+	before := snapshotMixed(t, st, result.MessageID)
+
+	if before.errorText == "" || len(before.failures) != 1 || before.reports != 0 {
+		t.Fatalf("unexpected state before reparse: %+v", before)
+	}
+
+	blob := storedMessageBlob(t, st, result.MessageID)
+	if bytes.Contains(blob, []byte("BODY-MARKER")) {
+		t.Fatalf("stored blob leaks body marker: %q", blob)
+	}
+
+	_, err := pipe.Reparse(t.Context())
+	mustSucceed(t, err)
+
+	after := snapshotMixed(t, st, result.MessageID)
+	assertMixedSame(t, &before, &after)
+
+	assertEqual(t, after.class, string(report.ClassTLS))
+	assertEqual(t, after.status, StatusPartial)
+
+	if reparsed := storedMessageBlob(t, st, result.MessageID); !bytes.Equal(reparsed, blob) {
+		t.Fatalf("sanitized blob not stable:\n%q\nwant:\n%q", reparsed, blob)
+	}
+}
+
+// Finding A: base64 of a decompressed report could push the stored envelope
+// over the message budget, so a reparse rejected it and every report
+// vanished. Copying the compressed attachment verbatim keeps the stored
+// blob within a small constant of the raw size.
+func TestLargeCompressedPlusFailureWithReducedLimit(t *testing.T) {
+	fakeParsers(t)
+
+	savedLimit := MaxMessageBytes
+	MaxMessageBytes = 64 << 10
+
+	t.Cleanup(func() { MaxMessageBytes = savedLimit })
+
+	pipe, st := fixtureStore(t, defaultOptions())
+
+	large := `<feedback id="big" end="1000" count="1"><!--` +
+		strings.Repeat("x", 48<<10) + `--></feedback>`
+	raw := []byte("From: reporter@example.net\r\nSubject: large mixed\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		multipart("mixed", "outer",
+			attachment("application/xml", gzipFixture(t, []byte(large), 1)),
+			mixedFailurePart()))
+
+	result := mustIngest(t, pipe, raw)
+	assertEqual(t, result.Class, report.ClassAggregate)
+	assertEqual(t, result.Status, StatusOK)
+
+	before := snapshotMixed(t, st, result.MessageID)
+	assertEqual(t, before.reports, 1)
+	assertEqual(t, before.records, 1)
+
+	if len(before.failures) != 1 {
+		t.Fatalf("failure rows = %+v", before.failures)
+	}
+
+	blob := storedMessageBlob(t, st, result.MessageID)
+	if len(blob) > len(raw)+4<<10 {
+		t.Fatalf("stored blob %d bytes exceeds raw %d bytes plus 4 KiB", len(blob), len(raw))
+	}
+
+	if bytes.Contains(blob, []byte("BODY-MARKER")) {
+		t.Fatalf("stored blob leaks body marker: %q", blob)
+	}
+
+	_, err := pipe.Reparse(t.Context())
+	mustSucceed(t, err)
+
+	after := snapshotMixed(t, st, result.MessageID)
+	assertMixedSame(t, &before, &after)
+}
+
+// One failure container may carry several feedback/header pairs, and the
+// feedback part may be transfer-encoded; the sanitized pair for each must
+// reparse to the same rows.
+func TestFailureMultiPairEncodedSurvivesReparse(t *testing.T) {
+	pipe, st := fixtureStore(t, defaultOptions())
+
+	feedbackA := "Feedback-Type: auth-failure\r\nVersion: 1\r\n" +
+		"Arrival-Date: Mon, 1 Jan 2024 01:02:03 +0000\r\nReported-Domain: a.example.com\r\n"
+	feedbackB := "Feedback-Type: auth-failure\r\nVersion: 1\r\n" +
+		"Arrival-Date: Mon, 1 Jan 2024 01:02:03 +0000\r\nReported-Domain: b.example.com\r\n"
+	headers := "From: s@example.com\r\nTo: r@example.net\r\nSubject: original\r\n"
+	reportPart := multipart("report; report-type=feedback-report", "fbx",
+		"Content-Type: text/plain\r\n\r\nhuman SECRET",
+		"Content-Type: message/feedback-report\r\n\r\n"+feedbackA,
+		"Content-Type: message/rfc822\r\n\r\n"+headers+"\r\nSECRET-A",
+		"Content-Type: message/feedback-report\r\nContent-Transfer-Encoding: base64\r\n\r\n"+
+			base64.StdEncoding.EncodeToString([]byte(feedbackB)),
+		"Content-Type: text/rfc822-headers\r\n\r\n"+headers+"\r\nSECRET-B")
+	raw := []byte("From: reporter@example.net\r\nSubject: multi\r\nMIME-Version: 1.0\r\n" +
+		multipart("mixed", "outer",
+			"Content-Type: text/plain\r\n\r\ncover note kept",
+			attachment("application/octet-stream",
+				zipFixture(t, [][]byte{[]byte(mixedAggregateXML)}, 1)),
+			reportPart))
+
+	result := mustIngest(t, pipe, raw)
+	assertEqual(t, result.Class, report.ClassAggregate)
+	assertEqual(t, result.Status, StatusOK)
+
+	before := snapshotMixed(t, st, result.MessageID)
+	assertEqual(t, before.reports, 1)
+
+	if len(before.failures) != 2 {
+		t.Fatalf("failure rows = %+v", before.failures)
+	}
+
+	blob := storedMessageBlob(t, st, result.MessageID)
+	for _, marker := range []string{"SECRET-A", "SECRET-B", "human SECRET"} {
+		if bytes.Contains(blob, []byte(marker)) {
+			t.Fatalf("stored blob leaks %q: %q", marker, blob)
+		}
+	}
+
+	if !bytes.Contains(blob, []byte("cover note kept")) {
+		t.Fatalf("stored blob dropped sibling text part: %q", blob)
+	}
+
+	_, err := pipe.Reparse(t.Context())
+	mustSucceed(t, err)
+
+	after := snapshotMixed(t, st, result.MessageID)
+	assertMixedSame(t, &before, &after)
+
+	if reparsed := storedMessageBlob(t, st, result.MessageID); !bytes.Equal(reparsed, blob) {
+		t.Fatalf("sanitized blob not stable:\n%q\nwant:\n%q", reparsed, blob)
 	}
 }
 
