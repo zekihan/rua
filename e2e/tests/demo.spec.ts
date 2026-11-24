@@ -35,11 +35,12 @@ const test = base.extend({
       )
         return;
       const url = message.location().url;
-      // Chromium logs the intentional demo 503 independently of how the app handles it.
+      // Remove once the server implements GET /api/reporters; the Receivers
+      // section degrades to a notice until then.
       if (
-        url.endsWith("/api/fetch") &&
+        url.includes("/api/reporters") &&
         message.text().startsWith("Failed to load resource:") &&
-        message.text().includes("503")
+        message.text().includes("404")
       )
         return;
       errors.push(message.text());
@@ -80,6 +81,14 @@ async function expectUrlParam(page: Page, key: string, value: string | null) {
   await expect
     .poll(() => new URL(page.url()).searchParams.get(key))
     .toBe(value);
+}
+
+function isPhoneViewport(page: Page) {
+  return (page.viewportSize()?.width ?? 1280) < 640;
+}
+
+function isPhone(info: TestInfo) {
+  return Boolean(info.project.use.isMobile);
 }
 
 test("overview, policy markers, date range, domain and time zone", async ({
@@ -187,6 +196,58 @@ test("overview, policy markers, date range, domain and time zone", async ({
   await expect(page.getByTestId("tz-picker")).toHaveValue("UTC");
 });
 
+test("daily chart bars are inspectable and the chart has a table", async ({
+  page,
+}, info) => {
+  await page.goto("/");
+  const chart = page
+    .getByTestId("daily-chart")
+    .filter({
+      has: page.getByRole("group", { name: "Daily messages by DMARC verdict" }),
+    })
+    .first();
+  const days = chart.getByTestId("chart-day");
+  await expect(days.first()).toBeVisible();
+  const dayCount = await days.count();
+  expect(dayCount).toBeGreaterThan(6);
+  await expect(days.nth(3)).toHaveAttribute(
+    "aria-label",
+    /^\d{4}-\d{2}-\d{2}: Pass [\d,]+, Forwarded [\d,]+, Fail [\d,]+$/,
+  );
+
+  await days.nth(3).focus();
+  const label = (await days.nth(3).getAttribute("aria-label")) ?? "";
+  const [date, counts] = label.split(": ");
+  const tooltip = chart.getByRole("tooltip");
+  await expect(tooltip).toContainText(date);
+  await expect(tooltip).toContainText(counts.split(", ")[2]);
+  await page.keyboard.press("Escape");
+  await expect(tooltip).toHaveCount(0);
+
+  if (isPhone(info)) {
+    await days.nth(5).tap();
+    await expect(tooltip).toContainText(
+      ((await days.nth(5).getAttribute("aria-label")) ?? "").split(": ")[0],
+    );
+    await page.getByTestId("overview-heading").tap();
+    await expect(tooltip).toHaveCount(0);
+  }
+
+  const toggle = chart.getByTestId("chart-table-toggle");
+  await expect(chart.getByTestId("chart-table")).toBeHidden();
+  await toggle.getByText("Show as table").click();
+  const table = chart.getByTestId("chart-table");
+  await expect(table).toBeVisible();
+  await expect(table.locator("thead th")).toHaveText([
+    "Date",
+    "Pass",
+    "Forwarded",
+    "Fail",
+  ]);
+  await expect(table.locator("tbody tr")).toHaveCount(dayCount);
+  await expect(table.locator("tbody tr").nth(3)).toContainText(date);
+});
+
 test("sources can be sorted, filtered and opened", async ({ page }, info) => {
   await page.goto("/sources");
   const table = page.getByTestId("sources-table");
@@ -239,25 +300,48 @@ test("reports paginate and expose the original downloads", async ({
   request,
 }, info) => {
   await page.goto("/reports?kind=dmarc-aggregate&tz=Europe%2FIstanbul");
-  const table = page.getByTestId("reports-table");
-  const rows = table.locator("tbody tr");
+  const phone = isPhone(info);
+  const rows = phone
+    ? page.getByTestId("report-card")
+    : page.getByTestId("reports-table").locator("tbody tr");
+  const rowLinks = phone ? rows.locator("a") : rows.locator("td:first-child a");
+  await expect(page.getByTestId("reports-verdict-filter")).toHaveCount(0);
   await expect(rows.first()).toBeVisible();
   await checkPage(page, info, "reports");
   const firstCount = await rows.count();
   const loadMore = page.getByTestId("reports-load-more");
   await loadMore.click();
   await expect.poll(() => rows.count()).toBeGreaterThan(firstCount);
-  const hrefs = await table
-    .locator("tbody td:first-child a")
-    .evaluateAll((links) => links.map((link) => link.getAttribute("href")));
+  const hrefs = await rowLinks.evaluateAll((links) =>
+    links.map((link) => link.getAttribute("href")),
+  );
   expect(new Set(hrefs).size).toBe(hrefs.length);
+  if (phone) {
+    const card = rows.first();
+    await expect(card).toContainText(/Messages [\d,]+/);
+    await expect(card).toContainText(/Pass rate [\d.]+%/);
+    await expect(card).toContainText(/example\.(com|net|org)/);
+    await expect(card).toContainText(/\d{4}-\d{2}-\d{2}/);
+  }
+  const reportsUrl = page.url();
   await rows.first().getByRole("link").click();
   await expect(page.getByTestId("report-detail-heading")).toHaveText(
     /^Report #\d+$/,
   );
-  await expect(
-    page.getByTestId("report-records-table").locator("tbody tr").first(),
-  ).toBeVisible();
+  await expect(page.getByTestId("report-detail-heading")).toBeFocused();
+  const record = phone
+    ? page.getByTestId("report-record-card").first()
+    : page.getByTestId("report-records-table").locator("tbody tr").first();
+  await expect(record).toBeVisible();
+  await expect(record).toContainText(/Pass|Forwarded|Fail/);
+  await expect(record).toContainText(/none|quarantine|reject/);
+  await expect(record).toContainText(/\d+\.\d+\.\d+\.\d+|:/);
+  if (phone) {
+    const auth = page.getByTestId("record-auth-details").first();
+    await expect(auth).not.toHaveAttribute("open", "");
+    await auth.locator("summary").click();
+    await expect(auth).toContainText(/=\s*(pass|fail|none|neutral)/);
+  }
   for (const [id, route] of [
     ["report-raw-download", "reports"],
     ["message-raw-download", "messages"],
@@ -276,6 +360,8 @@ test("reports paginate and expose the original downloads", async ({
   }
   await checkPage(page, info, "report-detail");
 
+  await page.goBack();
+  expect(page.url()).toBe(reportsUrl);
   await page.getByTestId("nav-reports").click();
   await page.getByTestId("reports-kind-filter").selectOption("tls-report");
   await expectUrlParam(page, "kind", "tls-report");
@@ -286,6 +372,24 @@ test("reports paginate and expose the original downloads", async ({
     page.getByTestId("report-tls-policies-table").locator("tbody tr").first(),
   ).toBeVisible();
   await checkPage(page, info, "report-tls-detail");
+});
+
+test.fixme("reports list the receivers that report and filter by one", async ({
+  page,
+}) => {
+  await page.goto("/reports");
+  const list = page.getByTestId("receivers-list");
+  await expect(list).toBeVisible();
+  const first = page.getByTestId("receiver-row").first();
+  await expect(first).toContainText(/\d+ reports? · [\d,]+ messages · last /);
+  const org = (await first.getByRole("link").textContent()) ?? "";
+  await first.getByRole("link").click();
+  await expectUrlParam(page, "reporter", org);
+  await expect(page.getByTestId("reports-reporter-filter")).toHaveValue(org);
+  const rows = isPhoneViewport(page)
+    ? page.getByTestId("report-card")
+    : page.getByTestId("reports-table").locator("tbody tr");
+  await expect(rows.first()).toContainText(org);
 });
 
 test("TLS sessions, failure details and policies", async ({ page }, info) => {
@@ -300,6 +404,16 @@ test("TLS sessions, failure details and policies", async ({ page }, info) => {
   await expect(
     page.getByRole("group", { name: "Daily TLS sessions by outcome" }),
   ).toBeVisible();
+  const failed = page.getByRole("group", {
+    name: "Daily failed TLS sessions",
+  });
+  await expect(failed).toBeVisible();
+  const failedChart = page.getByTestId("daily-chart").filter({ has: failed });
+  await failedChart.getByText("Show as table").click();
+  await expect(failedChart.getByTestId("chart-table")).toBeVisible();
+  await expect(
+    failedChart.getByTestId("chart-table").locator("thead th"),
+  ).toHaveText(["Date", "Failed"]);
   await expect(
     page.getByTestId("tls-failures-table").locator("tbody tr").first(),
   ).toBeVisible();
@@ -314,27 +428,72 @@ test("status shows ingestion data and handles disabled fetch", async ({
 }, info) => {
   await page.goto("/status?tz=America%2FNew_York");
   await expect(page.getByTestId("status-heading")).toBeVisible();
-  for (const id of [
-    "classes-table",
-    "problems-table",
-    "other-messages-table",
-    "failure-reports-table",
-  ]) {
+  const phone = isPhone(info);
+  for (const id of ["classes-table", "failure-reports-table"]) {
     await expect(
       page.getByTestId(id).locator("tbody tr").first(),
     ).toBeVisible();
   }
+  for (const id of ["problems-table", "other-messages-table"]) {
+    await expect(
+      phone
+        ? page.getByTestId(`${id}-cards`).getByTestId("message-card").first()
+        : page.getByTestId(id).locator("tbody tr").first(),
+    ).toBeVisible();
+  }
+  const problem = phone
+    ? page
+        .getByTestId("problems-table-cards")
+        .getByTestId("message-card")
+        .filter({ has: page.getByTestId("message-error") })
+        .first()
+    : page.getByTestId("problems-table").locator("tbody tr").first();
+  await expect(problem).toBeVisible();
+  if (phone) await expect(problem.getByTestId("message-error")).not.toBeEmpty();
   await checkPage(page, info, "status");
-  const fetchResponse = page.waitForResponse((response) =>
-    response.url().endsWith("/api/fetch"),
+  const fetchNow = page.getByTestId("fetch-now");
+  await expect(fetchNow).toBeDisabled();
+  await expect(fetchNow).toHaveAccessibleDescription(/IMAP is not configured/);
+  await expect(page.getByTestId("fetch-disabled-note")).toBeVisible();
+});
+
+test.fixme("status shows the pending backlog per mailbox", async ({
+  page,
+}, info) => {
+  await page.goto("/status");
+  const cells = page.getByTestId(
+    isPhone(info) ? "mailbox-card-pending" : "mailbox-pending",
   );
-  await page.getByTestId("fetch-now").click();
-  const response = await fetchResponse;
-  expect(response.request().method()).toBe("POST");
-  expect(response.request().headers()["x-rua"]).toBe("1");
-  expect(response.status()).toBe(503);
-  expect((await response.json()).error.code).toBe("fetch_disabled");
-  await expect(page.getByTestId("fetch-message")).toHaveText(
-    "Fetching is disabled (IMAP not configured).",
-  );
+  await expect(cells.first()).toBeVisible();
+  for (const text of await cells.allTextContents())
+    expect(text.trim()).toMatch(/(—|[\d,]+)$/);
+});
+
+test("navigation moves focus to the page heading", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("nav-status").click();
+  await expect(page.getByTestId("status-heading")).toBeFocused();
+  await page.getByTestId("nav-sources").click();
+  await expect(page.getByRole("heading", { level: 1 })).toBeFocused();
+});
+
+test("form controls have a visible border", async ({ page }) => {
+  await page.goto("/reports");
+  const select = page.getByTestId("reports-kind-filter");
+  await expect(select).toBeVisible();
+  const [border, fill] = await select.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return [style.borderTopColor, style.backgroundColor];
+  });
+  const luminance = (css: string) => {
+    const [r, g, b] = (css.match(/[\d.]+/g) ?? []).slice(0, 3).map((value) => {
+      const channel = Number(value) / 255;
+      return channel <= 0.03928
+        ? channel / 12.92
+        : ((channel + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const [a, b] = [luminance(border), luminance(fill)].sort((x, y) => y - x);
+  expect((a + 0.05) / (b + 0.05)).toBeGreaterThanOrEqual(3);
 });

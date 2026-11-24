@@ -1,4 +1,4 @@
-import { useEffect, type MouseEvent } from "react";
+import { useEffect, useRef, type MouseEvent } from "react";
 import { AppHeader } from "./components/AppHeader.tsx";
 import { PageHeading } from "./components/ui.tsx";
 import { useNavigation } from "./hooks/useNavigation.ts";
@@ -26,8 +26,36 @@ export default function App() {
   const { page, key, id } = props.state;
   const Page = page === "notFound" ? null : pages[page];
 
+  const mainRef = useRef<HTMLElement>(null);
+  const firstRoute = useRef(true);
   useEffect(() => {
     window.scrollTo(0, 0);
+    if (firstRoute.current) {
+      firstRoute.current = false;
+      return;
+    }
+    const main = mainRef.current;
+    if (!main) return;
+    const focusHeading = () => {
+      const heading = main.querySelector<HTMLElement>("h1");
+      heading?.focus({ preventScroll: true });
+      return Boolean(heading);
+    };
+    if (focusHeading()) return;
+    // The heading of a page that loads data appears later; focus it then,
+    // unless the user has already moved focus elsewhere.
+    main.focus({ preventScroll: true });
+    const observer = new MutationObserver(() => {
+      const active = document.activeElement;
+      if ((active !== main && active !== document.body) || focusHeading())
+        observer.disconnect();
+    });
+    observer.observe(main, { childList: true, subtree: true });
+    const timer = window.setTimeout(() => observer.disconnect(), 5000);
+    return () => {
+      observer.disconnect();
+      window.clearTimeout(timer);
+    };
   }, [page, key, id]);
 
   function followLink(event: MouseEvent<HTMLDivElement>) {
@@ -64,7 +92,12 @@ export default function App() {
         Skip to content
       </a>
       <AppHeader {...props} />
-      <main id="main" tabIndex={-1} className="shell py-5 sm:py-7">
+      <main
+        id="main"
+        ref={mainRef}
+        tabIndex={-1}
+        className="shell py-5 outline-none sm:py-7"
+      >
         {Page ? (
           <Page {...props} />
         ) : (

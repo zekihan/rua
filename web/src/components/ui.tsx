@@ -10,7 +10,8 @@ export function PageHeading({
 }) {
   return (
     <h1
-      className="text-2xl font-bold tracking-tight [overflow-wrap:anywhere] sm:text-[1.75rem]"
+      tabIndex={-1}
+      className="text-2xl font-bold tracking-tight outline-none [overflow-wrap:anywhere] sm:text-[1.75rem]"
       data-testid={testid}
     >
       {children}
@@ -71,12 +72,19 @@ export function Empty({ children }: { children: ReactNode }) {
 export function TableScroll({
   children,
   label,
+  className = "",
 }: {
   children: ReactNode;
   label: string;
+  className?: string;
 }) {
   return (
-    <div className="table-wrap" role="region" tabIndex={0} aria-label={label}>
+    <div
+      className={`table-wrap ${className}`}
+      role="region"
+      tabIndex={0}
+      aria-label={label}
+    >
       {children}
     </div>
   );

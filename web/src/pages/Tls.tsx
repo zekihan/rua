@@ -8,7 +8,7 @@ import {
   PageHeading,
   TableScroll,
 } from "../components/ui.tsx";
-import { TLSBars } from "../components/DailyChart.tsx";
+import { TLSBars, TLSFailureBars } from "../components/DailyChart.tsx";
 import { formatNumber, formatUnixDateTime } from "../format.ts";
 
 export function TlsList(p: PageProps) {
@@ -83,6 +83,10 @@ export function TlsDomain(p: PageProps) {
       <section className="card">
         <h2>Daily sessions</h2>
         <TLSBars days={d.days} />
+      </section>
+      <section className="card">
+        <h2>Failed sessions per day</h2>
+        <TLSFailureBars days={d.days} />
       </section>
       <section className="card">
         <h2>Failure types</h2>

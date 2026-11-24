@@ -72,7 +72,8 @@ export function FetchPanel({ status, tz }: { status: Status; tz: string }) {
           type="button"
           className="btn"
           data-testid="fetch-now"
-          disabled={fetch.running || fetchNow.isPending}
+          disabled={!fetch.enabled || fetch.running || fetchNow.isPending}
+          aria-describedby={fetch.enabled ? undefined : "fetch-disabled-note"}
           onClick={() => fetchNow.mutate()}
         >
           {fetchNow.isPending ? "Requesting…" : "Fetch now"}
@@ -98,7 +99,14 @@ export function FetchPanel({ status, tz }: { status: Status; tz: string }) {
         </p>
       ) : (
         !fetch.enabled && (
-          <p className="mt-3 text-xs text-ink-2">IMAP is disabled.</p>
+          <p
+            id="fetch-disabled-note"
+            data-testid="fetch-disabled-note"
+            className="mt-3 text-xs text-ink-2"
+          >
+            Fetch now is unavailable: IMAP is not configured, so there is no
+            mailbox to read. Stored reports remain available.
+          </p>
         )
       )}
     </section>

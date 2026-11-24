@@ -6,7 +6,11 @@ import type {
   FailureReport,
 } from "../../api/types.ts";
 import { Empty, TableScroll } from "../../components/ui.tsx";
-import { formatNumber, formatUnixDateTime } from "../../format.ts";
+import {
+  formatNumber,
+  formatPending,
+  formatUnixDateTime,
+} from "../../format.ts";
 
 export function Mailboxes({ rows, tz }: { rows: MailboxStatus[]; tz: string }) {
   return (
@@ -15,41 +19,103 @@ export function Mailboxes({ rows, tz }: { rows: MailboxStatus[]; tz: string }) {
       {rows.length === 0 ? (
         <Empty>No mailboxes configured.</Empty>
       ) : (
-        <TableScroll label="Mailbox checkpoints">
-          <table className="min-w-[35rem]" data-testid="mailboxes-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th className="num">UIDVALIDITY</th>
-                <th className="num">Next UID</th>
-                <th>Last fetch</th>
-                <th>Result</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((m) => (
-                <tr key={m.name}>
-                  <td>{m.name}</td>
-                  <td className="num">{m.uidValidity}</td>
-                  <td className="num">{m.nextUid}</td>
-                  <td className="small">
-                    {formatUnixDateTime(m.lastFetchStartAt, tz)} –{" "}
-                    {formatUnixDateTime(m.lastFetchEndAt, tz)}
-                    <div className="muted">
-                      last success {formatUnixDateTime(m.lastSuccessAt, tz)}
-                    </div>
-                  </td>
-                  <td>
-                    {m.lastResult || "—"}
-                    {m.lastError && (
-                      <div className="small muted">{m.lastError}</div>
-                    )}
-                  </td>
+        <>
+          <ul className="grid gap-2 sm:hidden" data-testid="mailboxes-cards">
+            {rows.map((m) => (
+              <li
+                key={m.name}
+                data-testid="mailbox-card"
+                className="space-y-1 rounded-lg border border-line bg-surface p-3"
+              >
+                <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-semibold">
+                  {m.name}
+                  {!m.configured && (
+                    <span className="badge">not configured (history)</span>
+                  )}
+                </p>
+                <p className="small" data-testid="mailbox-card-pending">
+                  <span className="muted">Pending</span>{" "}
+                  {m.pending !== null && m.pending > 0 ? (
+                    <span className="badge badge-unknown">
+                      {formatPending(m.pending)}
+                    </span>
+                  ) : (
+                    <strong>{formatPending(m.pending)}</strong>
+                  )}
+                </p>
+                <p className="small muted tabular-nums">
+                  UIDVALIDITY {m.uidValidity} · next UID {m.nextUid}
+                </p>
+                <p className="small">
+                  {m.lastResult || "—"} ·{" "}
+                  {formatUnixDateTime(m.lastFetchEndAt, tz)}
+                </p>
+                {m.lastError && (
+                  <p className="small text-fail [overflow-wrap:anywhere]">
+                    {m.lastError}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+          <TableScroll label="Mailbox checkpoints" className="max-sm:hidden">
+            <table className="min-w-[40rem]" data-testid="mailboxes-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th className="num">UIDVALIDITY</th>
+                  <th className="num">Next UID</th>
+                  <th className="num">Pending</th>
+                  <th>Last fetch</th>
+                  <th>Result</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </TableScroll>
+              </thead>
+              <tbody>
+                {rows.map((m) => (
+                  <tr key={m.name}>
+                    <td>
+                      {m.name}
+                      {!m.configured && (
+                        <div>
+                          <span
+                            className="badge"
+                            data-testid="mailbox-not-configured"
+                          >
+                            not configured (history)
+                          </span>
+                        </div>
+                      )}
+                    </td>
+                    <td className="num">{m.uidValidity}</td>
+                    <td className="num">{m.nextUid}</td>
+                    <td className="num" data-testid="mailbox-pending">
+                      {m.pending !== null && m.pending > 0 ? (
+                        <span className="badge badge-unknown">
+                          {formatPending(m.pending)}
+                        </span>
+                      ) : (
+                        formatPending(m.pending)
+                      )}
+                    </td>
+                    <td className="small">
+                      {formatUnixDateTime(m.lastFetchStartAt, tz)} –{" "}
+                      {formatUnixDateTime(m.lastFetchEndAt, tz)}
+                      <div className="muted">
+                        last success {formatUnixDateTime(m.lastSuccessAt, tz)}
+                      </div>
+                    </td>
+                    <td>
+                      {m.lastResult || "—"}
+                      {m.lastError && (
+                        <div className="small muted">{m.lastError}</div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableScroll>
+        </>
       )}
     </section>
   );
