@@ -10,16 +10,32 @@ const maxErrorLen = 500
 const redacted = "[redacted]"
 
 func scrub(err error, secret string) error {
-	if err == nil || secret == "" {
+	return scrubSecrets(err, []string{secret})
+}
+
+func scrubSecrets(err error, secrets []string) error {
+	if err == nil {
+		return nil
+	}
+
+	text := scrubText(err.Error(), secrets)
+	if text == err.Error() {
 		return err
 	}
 
-	text := err.Error()
-	if !strings.Contains(text, secret) {
-		return err
+	return redactedError(text)
+}
+
+func scrubText(text string, secrets []string) string {
+	for _, secret := range secrets {
+		if secret == "" || !strings.Contains(text, secret) {
+			continue
+		}
+
+		text = strings.ReplaceAll(text, secret, redacted)
 	}
 
-	return redactedError(strings.ReplaceAll(text, secret, redacted))
+	return text
 }
 
 type redactedError string
@@ -28,12 +44,12 @@ func (err redactedError) Error() string {
 	return string(err)
 }
 
-func clipError(err error, secret string) string {
+func clipError(err error, secrets ...string) string {
 	if err == nil {
 		return ""
 	}
 
-	return clip(scrub(err, secret).Error(), maxErrorLen)
+	return clip(scrubText(err.Error(), secrets), maxErrorLen)
 }
 
 func clip(text string, limit int) string {

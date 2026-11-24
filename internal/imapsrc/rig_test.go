@@ -39,6 +39,7 @@ var forbiddenCommands = map[string]struct{}{
 	"COPY":        {},
 	"MOVE":        {},
 	"EXPUNGE":     {},
+	"CLOSE":       {},
 	"APPEND":      {},
 	"CREATE":      {},
 	"DELETE":      {},
@@ -78,7 +79,7 @@ func newServerRig(t *testing.T, mailboxes []string, spec serverSpec) *rig {
 	user := imapmemserver.NewUser(testUser, testPassword)
 	memory.AddUser(user)
 
-	recorder := new(recorder)
+	recorder := newRecorder()
 	logger := new(lineLogger)
 
 	serverTLS := spec.config
@@ -93,6 +94,9 @@ func newServerRig(t *testing.T, mailboxes []string, spec serverSpec) *rig {
 	options.InsecureAuth = spec.mode == tlsNone
 	options.TLSConfig = serverTLS
 	options.Logger = logger
+	tap := new(wireTap)
+	tap.recorder = recorder
+	options.DebugWriter = tap
 
 	server := imapserver.New(options)
 
@@ -273,6 +277,19 @@ type eventRow struct {
 func (built *rig) assertReadOnly(t *testing.T, names ...string) {
 	t.Helper()
 
+	select {
+	case <-built.recorder.transportClosed:
+	case <-time.After(2 * time.Second):
+		t.Error("session closed without a transport-close record")
+	}
+
+	built.assertCommandsReadOnly(t)
+	built.assertFlagsUntouched(t, names...)
+}
+
+func (built *rig) assertCommandsReadOnly(t *testing.T) {
+	t.Helper()
+
 	commands := built.recorder.snapshot()
 	for _, command := range commands {
 		if _, forbidden := forbiddenCommands[command]; forbidden {
@@ -280,18 +297,45 @@ func (built *rig) assertReadOnly(t *testing.T, names ...string) {
 		}
 	}
 
+	wire := built.recorder.wireSnapshot()
+	for _, command := range wire {
+		if _, forbidden := forbiddenCommands[command]; forbidden {
+			t.Errorf("wire received %s in %v", command, wire)
+		}
+	}
+
+	if slices.Contains(wire, "TRANSPORT-CLOSE") || !slices.Contains(commands, "TRANSPORT-CLOSE") {
+		t.Errorf("commands = %v wire = %v", commands, wire)
+	}
+
+	if !slices.Contains(wire, "LOGOUT") {
+		t.Errorf("wire commands = %v, want LOGOUT", wire)
+	}
+
 	if !slices.Contains(commands, "EXAMINE") {
 		t.Errorf("commands = %v, want EXAMINE", commands)
 	}
 
+	built.assertPasswordAbsent(t, commands)
+}
+
+func (built *rig) assertPasswordAbsent(t *testing.T, commands []string) {
+	t.Helper()
+
 	secret := built.fetcher.cfg.Password
-	if secret != "" {
-		for _, command := range commands {
-			if strings.Contains(command, secret) {
-				t.Errorf("command recorded the password: %s", command)
-			}
+	if secret == "" {
+		return
+	}
+
+	for _, command := range commands {
+		if strings.Contains(command, secret) {
+			t.Errorf("command recorded the password: %s", command)
 		}
 	}
+}
+
+func (built *rig) assertFlagsUntouched(t *testing.T, names ...string) {
+	t.Helper()
 
 	for _, name := range names {
 		statusOptions := new(imap.StatusOptions)
@@ -311,8 +355,18 @@ func (built *rig) assertReadOnly(t *testing.T, names ...string) {
 }
 
 type recorder struct {
-	commands []string
-	mu       sync.Mutex
+	transportClosed chan struct{}
+	commands        []string
+	wire            []string
+	closeOnce       sync.Once
+	mu              sync.Mutex
+}
+
+func newRecorder() *recorder {
+	recorder := new(recorder)
+	recorder.transportClosed = make(chan struct{})
+
+	return recorder
 }
 
 func (recorder *recorder) add(command string) {
@@ -329,6 +383,27 @@ func (recorder *recorder) snapshot() []string {
 	copy(out, recorder.commands)
 
 	return out
+}
+
+func (recorder *recorder) addWire(command string) {
+	recorder.mu.Lock()
+	recorder.wire = append(recorder.wire, command)
+	recorder.mu.Unlock()
+}
+
+func (recorder *recorder) wireSnapshot() []string {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+
+	out := make([]string, len(recorder.wire))
+	copy(out, recorder.wire)
+
+	return out
+}
+
+func (recorder *recorder) noteTransportClosed() {
+	recorder.add("TRANSPORT-CLOSE")
+	recorder.closeOnce.Do(func() { close(recorder.transportClosed) })
 }
 
 func (recorder *recorder) count(command string) int {
@@ -355,6 +430,12 @@ func forward(err error) error {
 	}
 
 	return fmt.Errorf("imap session: %w", err)
+}
+
+func (session *recordingSession) Close() error {
+	session.recorder.noteTransportClosed()
+
+	return forward(session.Session.Close())
 }
 
 func (session *recordingSession) Login(username, password string) error {
@@ -551,6 +632,7 @@ type fakeSink struct {
 	failErr    error
 	block      <-chan struct{}
 	started    chan struct{}
+	before     func()
 	ingested   []ingestCall
 	skipped    []skipCall
 	failOn     int
@@ -616,6 +698,10 @@ func noneResult() ingest.Result {
 }
 
 func (sink *fakeSink) enter(ctx context.Context) error {
+	if sink.before != nil {
+		sink.before()
+	}
+
 	sink.mu.Lock()
 	sink.current++
 

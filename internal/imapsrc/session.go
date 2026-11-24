@@ -1,11 +1,12 @@
 package imapsrc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
+	"math"
 	"net"
 	"slices"
 	"time"
@@ -24,7 +25,12 @@ var errFetchSection = errors.New("unknown fetch section")
 type mailboxSession interface {
 	Examine(ctx context.Context, mailbox string) (examined, error)
 	UIDSearch(ctx context.Context, from uint32) ([]uint32, error)
-	UIDFetch(ctx context.Context, uids []uint32, section fetchSection) ([]messageData, error)
+	UIDFetch(
+		ctx context.Context,
+		uids []uint32,
+		section fetchSection,
+		keep int64,
+	) ([]messageData, error)
 	Logout(ctx context.Context) error
 }
 
@@ -45,21 +51,29 @@ type messageData struct {
 	Body         []byte
 	Size         int64
 	UID          uint32
+	HaveBody     bool
+	// Oversized is set when a full-body literal exceeded the claimed size or
+	// MaxMessageBytes. Body then holds only the header prefix.
+	Oversized bool
 }
 
 // imapSession wraps *imapclient.Client. Fetch code holds it as a
 // mailboxSession, whose methods are the only commands issued here.
 type imapSession struct {
-	raw *imapclient.Client
+	raw      *imapclient.Client
+	conn     net.Conn
+	stop     func() bool
+	limits   timeLimits
+	maxBytes int64
 }
 
 func (session *imapSession) Examine(ctx context.Context, mailbox string) (examined, error) {
 	var data *imap.SelectData
 
-	options := new(imap.SelectOptions)
-	options.ReadOnly = true
+	err := session.run(ctx, stageExamine, mailbox, session.limits.commandFor(), func() error {
+		options := new(imap.SelectOptions)
+		options.ReadOnly = true
 
-	err := session.call(ctx, func() error {
 		var waitErr error
 
 		data, waitErr = session.raw.Select(mailbox, options).Wait()
@@ -70,7 +84,7 @@ func (session *imapSession) Examine(ctx context.Context, mailbox string) (examin
 		return nil
 	})
 	if err != nil {
-		return examined{UIDValidity: 0}, fmt.Errorf("examine %s: %w", mailbox, err)
+		return examined{UIDValidity: 0}, err
 	}
 
 	return examined{UIDValidity: data.UIDValidity}, nil
@@ -89,7 +103,7 @@ func (session *imapSession) UIDSearch(ctx context.Context, from uint32) ([]uint3
 	criteria := new(imap.SearchCriteria)
 	criteria.UID = []imap.UIDSet{set}
 
-	err := session.call(ctx, func() error {
+	err := session.run(ctx, stageSearch, "", session.limits.commandFor(), func() error {
 		var waitErr error
 
 		data, waitErr = session.raw.UIDSearch(criteria, nil).Wait()
@@ -100,7 +114,7 @@ func (session *imapSession) UIDSearch(ctx context.Context, from uint32) ([]uint3
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("search UIDs: %w", err)
+		return nil, err
 	}
 
 	found := make([]uint32, 0, len(data.AllUIDs()))
@@ -122,6 +136,7 @@ func (session *imapSession) UIDFetch(
 	ctx context.Context,
 	uids []uint32,
 	section fetchSection,
+	keep int64,
 ) ([]messageData, error) {
 	if len(uids) == 0 {
 		return nil, nil
@@ -132,6 +147,24 @@ func (session *imapSession) UIDFetch(
 		nums[index] = imap.UID(uid)
 	}
 
+	opts, body, err := fetchOptions(section)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []messageData
+
+	err = session.run(ctx, stageFetch, "", session.limitFor(section), func() error {
+		return collectFetch(session.raw.Fetch(imap.UIDSetNum(nums...), opts), body, keep, &out)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return out, nil
+}
+
+func fetchOptions(section fetchSection) (*imap.FetchOptions, *imap.FetchItemBodySection, error) {
 	opts := new(imap.FetchOptions)
 	opts.UID = true
 
@@ -151,45 +184,184 @@ func (session *imapSession) UIDFetch(
 		body.Peek = true
 		opts.BodySection = []*imap.FetchItemBodySection{body}
 	default:
-		return nil, fmt.Errorf("%w: %d", errFetchSection, section)
+		return nil, nil, fmt.Errorf("%w: %d", errFetchSection, section)
 	}
 
-	var collected []*imapclient.FetchMessageBuffer
+	return opts, body, nil
+}
 
-	err := session.call(ctx, func() error {
-		var fetchErr error
-
-		collected, fetchErr = session.raw.Fetch(imap.UIDSetNum(nums...), opts).Collect()
-		if fetchErr != nil {
-			return fmt.Errorf("wait: %w", fetchErr)
+func collectFetch(
+	cmd *imapclient.FetchCommand,
+	body *imap.FetchItemBodySection,
+	keep int64,
+	out *[]messageData,
+) (err error) {
+	defer func() {
+		closeErr := cmd.Close()
+		if err == nil && closeErr != nil {
+			err = fmt.Errorf("wait: %w", closeErr)
 		}
+	}()
+
+	for {
+		msg := cmd.Next()
+		if msg == nil {
+			return nil
+		}
+
+		item, readErr := readMessage(msg, body, keep)
+		if readErr != nil {
+			return readErr
+		}
+
+		*out = append(*out, item)
+	}
+}
+
+func readMessage(
+	msg *imapclient.FetchMessageData,
+	body *imap.FetchItemBodySection,
+	keep int64,
+) (messageData, error) {
+	var item messageData
+
+	for {
+		field := msg.Next()
+		if field == nil {
+			return item, nil
+		}
+
+		err := applyFetchItem(&item, field, body, keep)
+		if err != nil {
+			return messageData{}, err
+		}
+	}
+}
+
+func applyFetchItem(
+	item *messageData,
+	field imapclient.FetchItemData,
+	body *imap.FetchItemBodySection,
+	keep int64,
+) error {
+	switch data := field.(type) {
+	case imapclient.FetchItemDataUID:
+		item.UID = uint32(data.UID)
+	case imapclient.FetchItemDataInternalDate:
+		item.InternalDate = data.Time
+	case imapclient.FetchItemDataRFC822Size:
+		item.Size = data.Size
+	case imapclient.FetchItemDataBodySection:
+		return readBodySection(item, data, body, keep)
+	case imapclient.FetchItemDataBinarySection:
+		return discardLiteral(data.Literal)
+	default:
+		return nil
+	}
+
+	return nil
+}
+
+func readBodySection(
+	item *messageData,
+	data imapclient.FetchItemDataBodySection,
+	body *imap.FetchItemBodySection,
+	keep int64,
+) error {
+	if body != nil && !data.MatchCommand(body) {
+		return discardLiteral(data.Literal)
+	}
+
+	payload, overflow, err := readLiteral(data.Literal, keep)
+	if err != nil {
+		return err
+	}
+
+	item.HaveBody = true
+
+	item.Oversized = overflow && (body == nil || body.Specifier != imap.PartSpecifierHeader)
+	if item.Oversized {
+		item.Body = headerPrefix(payload)
 
 		return nil
-	})
+	}
+
+	item.Body = payload
+
+	return nil
+}
+
+func discardLiteral(reader imap.LiteralReader) error {
+	if reader == nil {
+		return nil
+	}
+
+	_, err := io.Copy(io.Discard, reader)
 	if err != nil {
-		return nil, fmt.Errorf("fetch UIDs: %w", err)
+		return fmt.Errorf("discard FETCH literal: %w", err)
 	}
 
-	out := make([]messageData, 0, len(collected))
-	for _, buf := range collected {
-		item := messageData{
-			InternalDate: buf.InternalDate,
-			Body:         nil,
-			Size:         buf.RFC822Size,
-			UID:          uint32(buf.UID),
-		}
-		if body != nil {
-			item.Body = buf.FindBodySection(body)
-		}
+	return nil
+}
 
-		out = append(out, item)
+// readLiteral retains at most keep bytes and drains the rest. One extra byte
+// is read so a literal longer than keep is reported as overflow without
+// holding it.
+func readLiteral(reader imap.LiteralReader, keep int64) ([]byte, bool, error) {
+	if reader == nil {
+		return []byte{}, false, nil
 	}
 
-	return out, nil
+	if keep < 0 {
+		keep = 0
+	}
+
+	limit := keep
+	if keep < math.MaxInt64 {
+		limit = keep + 1
+	}
+
+	payload, err := io.ReadAll(io.LimitReader(reader, limit))
+	if err != nil {
+		return nil, false, fmt.Errorf("read FETCH literal: %w", err)
+	}
+
+	if int64(len(payload)) <= keep {
+		return payload, false, nil
+	}
+
+	_, err = io.Copy(io.Discard, reader)
+	if err != nil {
+		return nil, true, fmt.Errorf("discard FETCH literal: %w", err)
+	}
+
+	return payload[:keep], true, nil
+}
+
+func headerPrefix(raw []byte) []byte {
+	if len(raw) > maxHeaderBytes {
+		raw = raw[:maxHeaderBytes]
+	}
+
+	separator := []byte("\r\n\r\n")
+	end := len(raw)
+
+	index := bytes.Index(raw, separator)
+	if index >= 0 {
+		end = index + len(separator)
+	}
+
+	// Copy so the retained header does not pin a large literal buffer.
+	out := make([]byte, end)
+	copy(out, raw[:end])
+
+	return out
 }
 
 func (session *imapSession) Logout(ctx context.Context) error {
-	err := session.call(ctx, func() error {
+	defer session.closeWatch()
+
+	err := session.run(ctx, stageLogout, "", session.limits.commandFor(), func() error {
 		waitErr := session.raw.Logout().Wait()
 		if waitErr != nil {
 			return fmt.Errorf("wait: %w", waitErr)
@@ -199,50 +371,63 @@ func (session *imapSession) Logout(ctx context.Context) error {
 	})
 
 	closeErr := session.raw.Close()
-	if err != nil {
-		if closeErr != nil && !benignClose(closeErr) {
-			err = errors.Join(err, closeErr)
-		}
 
-		return fmt.Errorf("logout: %w", err)
+	if err != nil {
+		return err
 	}
 
 	if closeErr != nil && !benignClose(closeErr) {
-		return fmt.Errorf("close IMAP connection: %w", closeErr)
+		return redactedError(textConnectionClosed)
 	}
 
 	return nil
 }
 
-func (session *imapSession) call(ctx context.Context, fn func() error) error {
-	err := ctx.Err()
-	if err != nil {
-		return contextError(err)
+func (session *imapSession) limitFor(section fetchSection) time.Duration {
+	if section == sectionMeta {
+		return session.limits.commandFor()
 	}
 
-	stop := context.AfterFunc(ctx, func() {
-		closeErr := session.raw.Close()
-		if closeErr != nil && !benignClose(closeErr) {
-			slog.DebugContext(ctx, "Close IMAP connection", slog.Any("error", closeErr))
-		}
-	})
-
-	defer stop()
-
-	err = fn()
-
-	ctxErr := ctx.Err()
-	if ctxErr != nil {
-		return contextError(ctxErr)
-	}
-
-	return err
+	return session.limits.bodyFor(session.maxBytes)
 }
 
-func benignClose(err error) bool {
-	return err == nil ||
-		errors.Is(err, net.ErrClosed) ||
-		errors.Is(err, io.EOF) ||
-		errors.Is(err, io.ErrUnexpectedEOF) ||
-		errors.Is(err, io.ErrClosedPipe)
+func literalKeep(section fetchSection, claimed, maxBytes int64) int64 {
+	switch section {
+	case sectionHeader:
+		return maxHeaderBytes
+	case sectionFull:
+		if claimed < 0 {
+			claimed = 0
+		}
+
+		if maxBytes < 0 {
+			maxBytes = 0
+		}
+
+		if claimed > maxBytes {
+			return maxBytes
+		}
+
+		return claimed
+	case sectionMeta:
+		return 0
+	default:
+		return 0
+	}
+}
+
+func (session *imapSession) closeWatch() {
+	if session.stop != nil {
+		session.stop()
+		session.stop = nil
+	}
+}
+
+func (session *imapSession) run(
+	ctx context.Context,
+	stage, mailbox string,
+	limit time.Duration,
+	fn func() error,
+) error {
+	return runStage(ctx, session.conn, limit, stage, mailbox, fn)
 }

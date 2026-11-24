@@ -104,7 +104,7 @@ func (fetcher *Fetcher) markFailure(ctx context.Context, name string, cause erro
 		UPDATE mailboxes
 		SET last_fetch_end = ?, last_result = ?, last_error = ?
 		WHERE name = ?`,
-		fetcher.now().Unix(), resultError, clipError(cause, fetcher.cfg.Password), name)
+		fetcher.now().Unix(), resultError, clipError(cause, fetcher.secrets()...), name)
 }
 
 func (fetcher *Fetcher) markConnectFailure(ctx context.Context, name string, cause error) error {
@@ -114,23 +114,47 @@ func (fetcher *Fetcher) markConnectFailure(ctx context.Context, name string, cau
 		UPDATE mailboxes
 		SET last_fetch_start = ?, last_fetch_end = ?, last_result = ?, last_error = ?
 		WHERE name = ?`,
-		now, now, resultError, clipError(cause, fetcher.cfg.Password), name)
+		now, now, resultError, clipError(cause, fetcher.secrets()...), name)
 }
 
-func (fetcher *Fetcher) saveNextUID(ctx context.Context, name string, next uint32) error {
-	return fetcher.exec(ctx, `UPDATE mailboxes SET next_uid = ? WHERE name = ?`, int64(next), name)
+// saveNextUID moves the cursor forward only for the UIDVALIDITY this fetch
+// observed. A concurrent fetch that has already passed next, or that has
+// reset the generation, leaves the stored cursor where it is.
+func (fetcher *Fetcher) saveNextUID(ctx context.Context, name string, validity, next uint32) error {
+	if fetcher.beforeSave != nil {
+		fetcher.beforeSave(name, next)
+	}
+
+	_, err := fetcher.execResult(ctx, `
+		UPDATE mailboxes
+		SET next_uid = ?
+		WHERE name = ? AND uidvalidity = ? AND next_uid < ?`,
+		int64(next), name, int64(validity), int64(next))
+
+	return err
 }
 
-func (fetcher *Fetcher) saveUIDValidity(ctx context.Context, name string, validity uint32) error {
-	return fetcher.exec(ctx,
-		`UPDATE mailboxes SET uidvalidity = ? WHERE name = ?`, int64(validity), name)
+func (fetcher *Fetcher) saveUIDValidity(
+	ctx context.Context,
+	name string,
+	validity uint32,
+) (bool, error) {
+	rows, err := fetcher.execResult(ctx, `
+		UPDATE mailboxes
+		SET uidvalidity = ?
+		WHERE name = ? AND uidvalidity = 0`, int64(validity), name)
+	if err != nil {
+		return false, err
+	}
+
+	return rows > 0, nil
 }
 
 func (fetcher *Fetcher) resetValidity(
 	ctx context.Context,
 	name string,
 	oldValue, observed uint32,
-) error {
+) (bool, error) {
 	detail := strconv.FormatUint(
 		uint64(oldValue),
 		10,
@@ -139,43 +163,72 @@ func (fetcher *Fetcher) resetValidity(
 		10,
 	)
 	now := fetcher.now().Unix()
+	applied := false
 
 	err := fetcher.database.Write(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
-		_, execErr := tx.ExecContext(ctx, `
+		result, execErr := tx.ExecContext(ctx, `
+			UPDATE mailboxes
+			SET uidvalidity = ?, next_uid = 1
+			WHERE name = ? AND uidvalidity = ?`,
+			int64(observed), name, int64(oldValue))
+		if execErr != nil {
+			return fmt.Errorf("reset uidvalidity: %w", execErr)
+		}
+
+		rows, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return fmt.Errorf("rows affected: %w", rowsErr)
+		}
+
+		if rows == 0 {
+			return nil
+		}
+
+		_, execErr = tx.ExecContext(ctx, `
 			INSERT INTO events (at, kind, mailbox, detail)
 			VALUES (?, ?, ?, ?)`, now, eventUIDValidityReset, name, detail)
 		if execErr != nil {
 			return fmt.Errorf("insert event: %w", execErr)
 		}
 
-		_, execErr = tx.ExecContext(ctx, `
-			UPDATE mailboxes SET uidvalidity = ?, next_uid = 1 WHERE name = ?`,
-			int64(observed), name)
-		if execErr != nil {
-			return fmt.Errorf("reset uidvalidity: %w", execErr)
-		}
+		applied = true
 
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("record uidvalidity reset: %w", err)
+		return false, fmt.Errorf("record uidvalidity reset: %w", err)
 	}
 
-	return nil
+	return applied, nil
 }
 
 func (fetcher *Fetcher) exec(ctx context.Context, query string, args ...any) error {
+	_, err := fetcher.execResult(ctx, query, args...)
+
+	return err
+}
+
+func (fetcher *Fetcher) execResult(ctx context.Context, query string, args ...any) (int64, error) {
+	var rows int64
+
 	err := fetcher.database.Write(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
-		_, execErr := tx.ExecContext(ctx, query, args...)
+		result, execErr := tx.ExecContext(ctx, query, args...)
 		if execErr != nil {
 			return fmt.Errorf("exec: %w", execErr)
 		}
 
+		affected, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return fmt.Errorf("rows affected: %w", rowsErr)
+		}
+
+		rows = affected
+
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("update mailbox: %w", err)
+		return 0, fmt.Errorf("update mailbox: %w", err)
 	}
 
-	return nil
+	return rows, nil
 }

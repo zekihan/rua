@@ -160,7 +160,7 @@ func TestConnectRetry(t *testing.T) {
 	}
 
 	err := waitErr(t, errCh)
-	if err == nil || !strings.Contains(err.Error(), "connect IMAP") {
+	if err == nil || !strings.Contains(err.Error(), "connect failed") {
 		t.Fatalf("err = %v", err)
 	}
 

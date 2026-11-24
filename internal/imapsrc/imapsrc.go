@@ -60,11 +60,15 @@ type Fetcher struct {
 	sink          Sink
 	database      *store.Store
 	metrics       *telemetry.Metrics
+	logger        *slog.Logger
 	now           func() time.Time
 	after         func(time.Duration) (<-chan time.Time, func())
 	jitterN       func() int64
+	afterLoad     func(string)
+	beforeSave    func(string, uint32)
 	wake          chan struct{}
 	cfg           Config
+	limits        timeLimits
 	mu            sync.Mutex
 	running       bool
 }
@@ -147,7 +151,9 @@ func (fetcher *Fetcher) Run(ctx context.Context) error {
 		case err != nil:
 			failures++
 
-			slog.ErrorContext(ctx, "Fetch attempt failed", slog.Any("error", err))
+			fetcher.log().ErrorContext(ctx, "Fetch attempt failed",
+				slog.String("error", clipError(err, fetcher.secrets()...)),
+			)
 		default:
 			failures = 0
 		}
@@ -253,6 +259,29 @@ func (fetcher *Fetcher) wait(ctx context.Context, delay time.Duration) error {
 	case <-fetcher.wake:
 		return nil
 	}
+}
+
+func (fetcher *Fetcher) log() *slog.Logger {
+	if fetcher != nil && fetcher.logger != nil {
+		return fetcher.logger
+	}
+
+	return slog.Default()
+}
+
+func (fetcher *Fetcher) secrets() []string {
+	return []string{fetcher.cfg.Username, fetcher.cfg.Password}
+}
+
+// safe drops any wrapped server text and redacts the configured username and
+// password. Cancellation is preserved so a fetch can stop without recording
+// a failure.
+func (fetcher *Fetcher) safe(err error) error {
+	if err == nil || isCancel(err) {
+		return err
+	}
+
+	return redactedError(scrubText(err.Error(), fetcher.secrets()))
 }
 
 func isCancel(err error) bool {
