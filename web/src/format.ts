@@ -57,6 +57,36 @@ export function formatUnixDateTime(
     return new Date(unixSeconds * 1000).toISOString();
   }
 }
+export function formatUnixWindow(
+  begin: number | null | undefined,
+  end: number | null | undefined,
+  tz: string,
+): string {
+  if (!begin || !end) return "—";
+  try {
+    const zone = tz || "UTC";
+    const day = new Intl.DateTimeFormat("en-GB", {
+      timeZone: zone,
+      day: "numeric",
+      month: "short",
+    });
+    const time = new Intl.DateTimeFormat("en-GB", {
+      timeZone: zone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    const start = new Date(begin * 1000);
+    const finish = new Date(end * 1000);
+    const startDay = day.format(start);
+    const endDay = day.format(finish);
+    return startDay === endDay
+      ? `${startDay} ${time.format(start)} – ${time.format(finish)}`
+      : `${startDay} ${time.format(start)} – ${endDay} ${time.format(finish)}`;
+  } catch {
+    return `${new Date(begin * 1000).toISOString()} – ${new Date(end * 1000).toISOString()}`;
+  }
+}
 export function formatDateLabel(date: string): string {
   // date is YYYY-MM-DD in tz; render without shifting the day.
   const [y, m, d] = date.split("-").map(Number);

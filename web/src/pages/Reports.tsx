@@ -13,7 +13,12 @@ import {
   PageHeading,
   TableScroll,
 } from "../components/ui.tsx";
-import { formatNumber, formatPercent, formatUnixDateTime } from "../format.ts";
+import {
+  formatNumber,
+  formatPercent,
+  formatUnixDateTime,
+  formatUnixWindow,
+} from "../format.ts";
 
 function ReportFilters({
   filters,
@@ -87,6 +92,12 @@ function ReportTable({
                 </span>
               </div>
               <p className="[overflow-wrap:anywhere]">{report.domain || "—"}</p>
+              <p
+                className="small muted tabular-nums"
+                data-testid="report-card-window"
+              >
+                {formatUnixWindow(report.begin, report.end, tz)}
+              </p>
               <p className="small tabular-nums">
                 {tls ? (
                   <>
