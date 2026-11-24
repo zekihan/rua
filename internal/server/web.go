@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
-	"path"
 	"strings"
 	"time"
 )
@@ -29,10 +28,11 @@ func (srv *Server) serveWeb(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	extension := path.Ext(strings.TrimRight(name, "/"))
+	// App routes may contain dots (/tls/example.com), so only missing
+	// build assets are 404s.
 	isAsset := name == "assets" || strings.HasPrefix(name, "assets/")
 
-	if name != indexFile && (isAsset || extension != "") {
+	if name != indexFile && isAsset {
 		http.NotFound(writer, request)
 
 		return

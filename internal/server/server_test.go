@@ -351,7 +351,8 @@ func TestSPAFallback(t *testing.T) {
 	eq(t, asset.Code, http.StatusOK)
 	eq(t, strings.Contains(asset.Header().Get("Cache-Control"), "immutable"), true)
 	eq(t, env.do(t, http.MethodGet, "/assets/missing.js", nil).Code, http.StatusNotFound)
-	eq(t, env.do(t, http.MethodGet, "/missing.png", nil).Code, http.StatusNotFound)
+	eq(t, env.do(t, http.MethodGet, "/tls/example.com", nil).Code, http.StatusOK)
+	eq(t, env.do(t, http.MethodGet, "/sources/ip:192.0.2.1", nil).Code, http.StatusOK)
 }
 
 func TestReportsCursorOverHTTP(t *testing.T) {
