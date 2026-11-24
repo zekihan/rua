@@ -126,14 +126,10 @@ func (ext *extraction) walk(entity *message.Entity, depth int) error {
 			break
 		}
 
-		if err != nil && !message.IsUnknownCharset(err) {
+		if err != nil && (part == nil || !message.IsUnknownCharset(err)) {
 			ext.failed(fmt.Errorf("read MIME part: %w", err))
 
-			if !message.IsUnknownEncoding(err) {
-				break
-			}
-
-			continue
+			break
 		}
 
 		if isFeedback && ext.readFailurePart(&feedback, part) {

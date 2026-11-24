@@ -50,7 +50,7 @@ func sanitizeFailureMessage(raw []byte) []byte {
 		}
 
 		if partErr != nil {
-			continue
+			break
 		}
 
 		writeSanitizedPart(writer, part)

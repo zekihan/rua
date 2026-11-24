@@ -464,6 +464,54 @@ func TestFailureBlobSanitized(t *testing.T) {
 	)
 }
 
+func finishWithin(t *testing.T, name string, fn func()) {
+	t.Helper()
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		fn()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s did not finish", name)
+	}
+}
+
+var truncatedMultipart = map[string]string{
+	"missing closing boundary": "From: reporter@example.net\r\n" +
+		"Content-Type: multipart/report; report-type=feedback-report; boundary=fb\r\n\r\n" +
+		"--fb\r\nContent-Type: message/feedback-report\r\n\r\nFeedback-Type: auth-failure\r\n",
+	"truncated part headers": "From: reporter@example.net\r\n" +
+		"Content-Type: multipart/report; report-type=feedback-report; boundary=fb\r\n\r\n" +
+		"--fb\r\nContent-Type: message/feedback-repor",
+	"truncated nested part headers": "From: reporter@example.net\r\n" +
+		"Content-Type: multipart/mixed; boundary=outer\r\n\r\n" +
+		"--outer\r\nContent-Type: text/plain\r\nX-Trunc",
+}
+
+func TestSanitizeTruncatedMultipart(t *testing.T) {
+	for name, raw := range truncatedMultipart {
+		finishWithin(t, name, func() { _ = sanitizeFailureMessage([]byte(raw)) })
+	}
+}
+
+func TestIngestTruncatedMultipart(t *testing.T) {
+	for name, raw := range truncatedMultipart {
+		pipe, _ := fixtureStore(t, defaultOptions())
+
+		var source Source
+
+		finishWithin(t, name, func() {
+			_, _ = pipe.Ingest(t.Context(), []byte(raw), source)
+		})
+	}
+}
+
 func TestSkipIdenticalHeaders(t *testing.T) {
 	fakeParsers(t)
 
