@@ -133,6 +133,13 @@ func TestTLSRejectsInvalidDocuments(t *testing.T) {
 			1,
 		),
 		"deep nesting": `{"unknown":` + nested + "," + strings.TrimPrefix(base, "{"),
+		"no summary":   strings.Replace(base, `"summary":`, `"unknown":`, 1),
+		"missing successful count": strings.Replace(
+			base, `"total-successful-session-count": 0,`, ``, 1,
+		),
+		"missing failure count": strings.Replace(
+			base, `, "total-failure-session-count": 4`, ``, 1,
+		),
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {

@@ -17,6 +17,7 @@ var (
 	errMetadata        = errors.New("missing or invalid TLS report metadata")
 	errDomain          = errors.New("missing TLS policy domain")
 	errSessionCount    = errors.New("invalid TLS session count")
+	errMissingSummary  = errors.New("missing TLS policy summary")
 	errTooManyFailures = errors.New("too many TLS failure details")
 	errFailureArray    = errors.New("TLS failure details must be an array")
 )
@@ -61,17 +62,17 @@ type document struct {
 
 //nolint:tagliatelle // The JSON keys are defined by RFC 8460.
 type policy struct {
-	Policy struct {
+	Summary *struct {
+		Success *int64 `json:"total-successful-session-count"`
+		Failure *int64 `json:"total-failure-session-count"`
+	} `json:"summary"`
+	Failures failureDetails `json:"failure-details"`
+	Policy   struct {
 		Type    string          `json:"policy-type"`
 		Domain  string          `json:"policy-domain"`
 		Strings []string        `json:"policy-string"`
 		MX      stringsOrString `json:"mx-host"`
 	} `json:"policy"`
-	Failures failureDetails `json:"failure-details"`
-	Summary  struct {
-		Success int64 `json:"total-successful-session-count"`
-		Failure int64 `json:"total-failure-session-count"`
-	} `json:"summary"`
 }
 
 //nolint:tagliatelle // The JSON keys follow the RFC 8460 schema and field descriptions.
@@ -166,15 +167,19 @@ func (wire *policy) parsed() (report.TLSPolicy, error) {
 		return report.TLSPolicy{}, errDomain
 	}
 
-	if !validCount(wire.Summary.Success) || !validCount(wire.Summary.Failure) {
+	if wire.Summary == nil || wire.Summary.Success == nil || wire.Summary.Failure == nil {
+		return report.TLSPolicy{}, errMissingSummary
+	}
+
+	if !validCount(*wire.Summary.Success) || !validCount(*wire.Summary.Failure) {
 		return report.TLSPolicy{}, errSessionCount
 	}
 
 	out := report.TLSPolicy{
 		Type:     text.LowerShort(wire.Policy.Type),
 		Domain:   domain,
-		Success:  wire.Summary.Success,
-		Failure:  wire.Summary.Failure,
+		Success:  *wire.Summary.Success,
+		Failure:  *wire.Summary.Failure,
 		Strings:  nil,
 		MXHosts:  nil,
 		Failures: nil,

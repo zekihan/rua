@@ -30,13 +30,16 @@ const (
 )
 
 var (
-	errXMLDirective   = errors.New("XML directives are forbidden")
-	errXMLDepth       = errors.New("XML nesting too deep")
-	errXMLDocument    = errors.New("expected one XML document")
-	errTooManyRecords = errors.New("too many aggregate records")
-	errMetadata       = errors.New("missing or invalid aggregate metadata")
-	errRecordCount    = errors.New("invalid aggregate record count")
-	errSourceIP       = errors.New("invalid aggregate source IP")
+	errXMLDirective     = errors.New("XML directives are forbidden")
+	errXMLDepth         = errors.New("XML nesting too deep")
+	errXMLDocument      = errors.New("expected one XML document")
+	errTooManyRecords   = errors.New("too many aggregate records")
+	errMetadata         = errors.New("missing or invalid aggregate metadata")
+	errRecordCount      = errors.New("invalid aggregate record count")
+	errSourceIP         = errors.New("invalid aggregate source IP")
+	errMissingRow       = errors.New("missing aggregate record row")
+	errMissingEvaluated = errors.New("missing aggregate policy_evaluated")
+	errMissingCount     = errors.New("missing aggregate record count")
 )
 
 type reason struct {
@@ -44,18 +47,26 @@ type reason struct {
 	Comment string `xml:"comment"`
 }
 
+type evaluated struct {
+	Disposition string   `xml:"disposition"`
+	DKIM        *string  `xml:"dkim"`
+	SPF         *string  `xml:"spf"`
+	Reasons     []reason `xml:"reason"`
+}
+
+type rowBody struct {
+	Count     *string    `xml:"count"`
+	Evaluated *evaluated `xml:"policy_evaluated"`
+	IP        string     `xml:"source_ip"`
+}
+
 type row struct {
-	IP          string   `xml:"row>source_ip"`
-	Count       string   `xml:"row>count"`
-	Disposition string   `xml:"row>policy_evaluated>disposition"`
-	DKIM        string   `xml:"row>policy_evaluated>dkim"`
-	SPF         string   `xml:"row>policy_evaluated>spf"`
-	Header      string   `xml:"identifiers>header_from"`
-	From        string   `xml:"identifiers>envelope_from"`
-	To          string   `xml:"identifiers>envelope_to"`
-	Reasons     []reason `xml:"row>policy_evaluated>reason"`
-	DKIMAuth    []auth   `xml:"auth_results>dkim"`
-	SPFAuth     []auth   `xml:"auth_results>spf"`
+	Body     *rowBody `xml:"row"`
+	Header   string   `xml:"identifiers>header_from"`
+	From     string   `xml:"identifiers>envelope_from"`
+	To       string   `xml:"identifiers>envelope_to"`
+	DKIMAuth []auth   `xml:"auth_results>dkim"`
+	SPFAuth  []auth   `xml:"auth_results>spf"`
 }
 type document struct {
 	Pct       *string  `xml:"policy_published>pct"`
@@ -234,12 +245,25 @@ func (doc *document) policy() (report.Policy, string, error) {
 }
 
 func (wire *row) record() (report.Record, error) {
-	ip, ipErr := netip.ParseAddr(strings.TrimSpace(wire.IP))
+	if wire.Body == nil {
+		return report.Record{}, errMissingRow
+	}
+
+	if wire.Body.Count == nil {
+		return report.Record{}, errMissingCount
+	}
+
+	if wire.Body.Evaluated == nil || wire.Body.Evaluated.DKIM == nil ||
+		wire.Body.Evaluated.SPF == nil {
+		return report.Record{}, errMissingEvaluated
+	}
+
+	ip, ipErr := netip.ParseAddr(strings.TrimSpace(wire.Body.IP))
 	if ipErr != nil || ip.Zone() != "" {
 		return report.Record{}, errSourceIP
 	}
 
-	count, err := strconv.ParseInt(strings.TrimSpace(wire.Count), 10, 64)
+	count, err := strconv.ParseInt(strings.TrimSpace(*wire.Body.Count), 10, 64)
 	if err != nil || count < 0 || count > report.MaxCount {
 		return report.Record{}, errRecordCount
 	}
@@ -247,16 +271,16 @@ func (wire *row) record() (report.Record, error) {
 	record := report.Record{
 		SourceIP:     ip.String(),
 		Count:        count,
-		Disposition:  text.LowerShort(wire.Disposition),
-		DKIM:         text.LowerShort(wire.DKIM),
-		SPF:          text.LowerShort(wire.SPF),
+		Disposition:  text.LowerShort(wire.Body.Evaluated.Disposition),
+		DKIM:         text.LowerShort(*wire.Body.Evaluated.DKIM),
+		SPF:          text.LowerShort(*wire.Body.Evaluated.SPF),
 		HeaderFrom:   text.LowerShort(wire.Header),
 		EnvelopeFrom: text.LowerShort(wire.From),
 		EnvelopeTo:   text.LowerShort(wire.To),
 		Reasons:      nil,
 		Auth:         nil,
 	}
-	for _, reason := range wire.Reasons {
+	for _, reason := range wire.Body.Evaluated.Reasons {
 		record.Reasons = append(record.Reasons, report.Reason{
 			Type:    text.LowerShort(reason.Type),
 			Comment: text.Limit(reason.Comment, report.MaxLong),
