@@ -55,7 +55,7 @@ type extraction struct {
 func newExtraction(accept func(document) error) *extraction {
 	return &extraction{
 		class:      report.ClassOther,
-		remaining:  MaxMessageBytes,
+		remaining:  int64(MaxMessageBytes),
 		accept:     accept,
 		firstError: nil,
 		hasFailure: false,
@@ -382,7 +382,7 @@ func (ext *extraction) gzip(reader io.Reader, hint report.Class) error {
 func (ext *extraction) zip(reader io.Reader, hint report.Class) error {
 	// ZIP requires random access to the compressed bytes. The input MIME bytes
 	// are already bounded by MaxMessageBytes; each entry has a separate cap.
-	data, err := io.ReadAll(io.LimitReader(reader, MaxMessageBytes+1))
+	data, err := io.ReadAll(io.LimitReader(reader, int64(MaxMessageBytes)+1))
 	if err != nil {
 		ext.failed(fmt.Errorf("read zip archive: %w", err))
 

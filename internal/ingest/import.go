@@ -112,7 +112,7 @@ func (pipe *Pipeline) importFile(
 		return pipe.importMbox(ctx, reader, info.ModTime(), summary)
 	}
 
-	raw, err := io.ReadAll(io.LimitReader(reader, MaxMessageBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(reader, int64(MaxMessageBytes)+1))
 	switch {
 	case err != nil:
 		summary.Failed++
