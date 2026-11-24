@@ -132,8 +132,15 @@ func (ext *extraction) walk(entity *message.Entity, depth int) error {
 			break
 		}
 
-		if isFeedback && ext.readFailurePart(&feedback, part) {
-			continue
+		if isFeedback {
+			handled, partErr := ext.readFailurePart(&feedback, part)
+			if partErr != nil {
+				return partErr
+			}
+
+			if handled {
+				continue
+			}
 		}
 
 		err = ext.walk(part, depth+1)
@@ -151,14 +158,27 @@ type failureParts struct {
 	headerError bool
 }
 
-func (ext *extraction) readFailurePart(parts *failureParts, entity *message.Entity) bool {
+func (ext *extraction) readFailurePart(
+	parts *failureParts, entity *message.Entity,
+) (bool, error) {
 	mediaType, _, err := entity.Header.ContentType()
 	if err != nil {
-		return false
+		return false, nil //nolint:nilerr // The generic walk reports the invalid Content-Type.
 	}
 
 	switch mediaType {
 	case typeFeedback:
+		// A report container may carry several feedback/header pairs; a new
+		// feedback part completes the previous pair.
+		if len(parts.feedback) > 0 {
+			err := ext.failure(*parts)
+			if err != nil {
+				return true, err
+			}
+
+			*parts = failureParts{feedback: nil, headers: nil, headerError: false}
+		}
+
 		data, err := ext.read(entity.Body)
 		if err != nil {
 			ext.failed(err)
@@ -175,10 +195,10 @@ func (ext *extraction) readFailurePart(parts *failureParts, entity *message.Enti
 			parts.headers = data
 		}
 	default:
-		return false
+		return false, nil
 	}
 
-	return true
+	return true, nil
 }
 
 func (ext *extraction) failure(parts failureParts) error {
