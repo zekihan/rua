@@ -72,3 +72,6 @@ export function formatDateLabel(date: string): string {
     return date;
   }
 }
+export function formatPending(n: number | null | undefined): string {
+  return n === null || n === undefined ? "—" : formatNumber(n);
+}

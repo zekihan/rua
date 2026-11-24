@@ -7,6 +7,7 @@ import {
   formatDateLabel,
   formatUnixDate,
   formatUnixDateTime,
+  formatPending,
 } from "../src/format.ts";
 test("numbers and percents", () => {
   assert.equal(formatNumber(1234567), "1,234,567");
@@ -41,4 +42,10 @@ test("zero differs from a missing rate, and invalid byte counts are hidden", () 
   assert.equal(formatPercent(Number.NaN), "—");
   assert.equal(formatBytes(-1), "—");
   assert.equal(formatBytes(1024 ** 3), "1.0 GiB");
+});
+
+test("pending backlog shows a dash when unknown", () => {
+  assert.equal(formatPending(null), "—");
+  assert.equal(formatPending(0), "0");
+  assert.equal(formatPending(1500), "1,500");
 });
