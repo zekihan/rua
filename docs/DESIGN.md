@@ -81,9 +81,10 @@ Per mailbox, rua stores `uidvalidity` and `next_uid` (the high-water mark).
    stored messages are recognised by content (below), so a reset costs one
    rescan and creates no duplicates.
 2. `UID SEARCH UID <next_uid>:*`.
-3. Fetch the result in batches of 50 UIDs (`UID`, `INTERNALDATE`,
-   `RFC822.SIZE`, `BODY.PEEK[]`). Messages larger than `MAX_MESSAGE_BYTES`
-   (default 25 MiB) are fetched as headers only and recorded as skipped.
+3. Fetch metadata in batches of 50 UIDs (`UID`, `INTERNALDATE`,
+   `RFC822.SIZE`), then each body on its own (`BODY.PEEK[]`), so memory stays
+   bounded by one message. Messages larger than `MAX_MESSAGE_BYTES` (default
+   25 MiB) are fetched as headers only and recorded as skipped.
 4. Each message is committed in its own transaction: message row, raw blobs,
    parsed reports. `next_uid` advances only past a contiguous run of committed
    UIDs, so a crash mid-batch resumes at the first uncommitted message.
