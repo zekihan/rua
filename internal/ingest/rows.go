@@ -228,6 +228,7 @@ func (state *messageWrite) storeFailure(
 	}
 
 	state.failuresWritten++
+	state.parsedFailures = append(state.parsedFailures, *value)
 
 	return nil
 }

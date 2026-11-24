@@ -34,14 +34,32 @@ const (
 )
 
 type messageWrite struct {
-	preserved       map[reportIdentity][]int64
-	messageError    string
-	result          Result
-	aggregateRows   int
-	tlsRows         int
-	failuresWritten int
-	recordsAdded    bool
-	hasFailure      bool
+	preserved        map[reportIdentity][]int64
+	messageError     string
+	result           Result
+	parsedAggregates []*report.Aggregate
+	parsedTLS        []*report.TLS
+	parsedFailures   []report.Failure
+	failureDocs      []document
+	aggregateRows    int
+	tlsRows          int
+	failuresWritten  int
+	failureCount     int
+	recordsAdded     bool
+	hasFailure       bool
+}
+
+func (state *messageWrite) outcome() *evalOutcome {
+	out := &evalOutcome{
+		class: state.result.Class, status: state.result.Status,
+		errText: state.messageError, aggregates: state.parsedAggregates,
+		tlsReports: state.parsedTLS, failures: state.parsedFailures,
+		failureDocs: state.failureDocs, failureCount: state.failureCount,
+		reportRows: state.aggregateRows + state.tlsRows,
+		hasFailure: state.hasFailure,
+	}
+
+	return out
 }
 
 // reportIdentity identifies a report row across a reparse (DESIGN.md
@@ -149,7 +167,7 @@ func (pipe *Pipeline) Ingest(ctx context.Context, raw []byte, src Source) (Resul
 			entity, headerErr = message.Read(bytes.NewReader(raw))
 		}
 
-		err := parseMessage(ctx, tx, state, raw, entity, headerErr)
+		err := parseMessage(ctx, tx, state, raw, entity, headerErr, false)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -157,7 +175,7 @@ func (pipe *Pipeline) Ingest(ctx context.Context, raw []byte, src Source) (Resul
 		if len(raw) <= MaxMessageBytes {
 			stored := raw
 			if state.hasFailure {
-				stored = sanitizeMessage(raw)
+				stored = buildStoredCopy(raw, state.outcome())
 			}
 
 			blob, err = store.PutBlob(ctx, tx, stored)
@@ -303,12 +321,12 @@ func (state *messageWrite) parse(ctx context.Context, tx *sqlx.Tx, raw []byte) e
 		entity, headerErr = message.Read(bytes.NewReader(raw))
 	}
 
-	return parseMessage(ctx, tx, state, raw, entity, headerErr)
+	return parseMessage(ctx, tx, state, raw, entity, headerErr, true)
 }
 
 func parseMessage(
 	ctx context.Context, tx *sqlx.Tx, state *messageWrite, raw []byte,
-	entity *message.Entity, headerErr error,
+	entity *message.Entity, headerErr error, trustRua bool,
 ) error {
 	ext := newExtraction(nil)
 	ext.accept = func(doc document) error {
@@ -321,6 +339,7 @@ func parseMessage(
 	}
 
 	state.hasFailure = ext.hasFailure
+	state.failureCount = ext.failureCount
 	state.result.Class = ext.class
 	state.result.Reports = state.aggregateRows + state.tlsRows
 
@@ -332,6 +351,13 @@ func parseMessage(
 		}
 
 		state.messageError = boundedText(ext.firstError.Error(), report.MaxLong)
+	}
+
+	if trustRua {
+		outcome := state.outcome()
+		applyRuaHeaders(entity, outcome)
+		state.result.Status = outcome.status
+		state.messageError = outcome.errText
 	}
 
 	return nil
@@ -349,6 +375,8 @@ func (state *messageWrite) storeDocument(
 			return nil
 		}
 
+		state.parsedAggregates = append(state.parsedAggregates, value)
+
 		return state.storeAggregate(ctx, tx, doc.data, value)
 	case report.ClassTLS:
 		value, err := parseTLS(doc.data)
@@ -364,8 +392,12 @@ func (state *messageWrite) storeDocument(
 			return nil
 		}
 
+		state.parsedTLS = append(state.parsedTLS, value)
+
 		return state.storeTLS(ctx, tx, doc.data, value)
 	case report.ClassFailure:
+		state.failureDocs = append(state.failureDocs, doc)
+
 		value, err := parseFailure(doc.data, doc.originalHeaders)
 		if err != nil {
 			ext.failed(fmt.Errorf("parse DMARC failure: %w", err))
