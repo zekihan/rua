@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/jmoiron/sqlx"
 
 	"github.com/zekihan/rua/internal/imapsrc"
 	"github.com/zekihan/rua/internal/ingest"
@@ -262,6 +265,20 @@ func TestServerRawAndErrors(t *testing.T) {
 	msgRaw := env.do(t, http.MethodGet, "/api/messages/1/raw", nil)
 	eq(t, msgRaw.Code, http.StatusOK)
 	eq(t, strings.Contains(msgRaw.Header().Get("Content-Disposition"), "message-1.eml"), true)
+
+	err := env.st.Write(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		_, execErr := tx.ExecContext(ctx, `UPDATE messages SET parser_version = 1 WHERE id = 1`)
+
+		return execErr //nolint:wrapcheck // Test helper.
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pending := env.do(t, http.MethodGet, "/api/messages/1/raw", nil)
+	eq(t, pending.Code, http.StatusServiceUnavailable)
+	eq(t, pending.Header().Get("Retry-After"), "60")
+	eq(t, decodeJSON[query.ErrorBody](t, pending).Error.Code, "unavailable")
 
 	eq(t, env.do(t, http.MethodGet, "/api/reports/99999?tz=UTC", nil).Code, http.StatusNotFound)
 	eq(
