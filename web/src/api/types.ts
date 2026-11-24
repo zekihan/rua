@@ -291,6 +291,8 @@ export interface FetchState {
   running: boolean;
 }
 export interface MailboxStatus {
+  pending: number | null;
+  configured: boolean;
   lastFetchStartAt: number | null;
   lastFetchEndAt: number | null;
   lastSuccessAt: number | null;
@@ -343,4 +345,19 @@ export interface ErrorBody {
 export interface ErrorDetail {
   code: string;
   message: string;
+}
+
+export interface ReportersResponse {
+  range: Range;
+  reporters: Reporter[];
+}
+
+export interface Reporter {
+  org: string;
+  domains: string[];
+  reports: number;
+  messages: number;
+  firstReportAt: number;
+  lastReportAt: number;
+  quiet: boolean;
 }

@@ -364,6 +364,9 @@ type FetchState struct {
 }
 
 type MailboxStatus struct {
+	// Pending is how many messages the last fetch found but did not
+	// process (for example after an error); null before the first fetch.
+	Pending        *int64 `json:"pending"`
 	LastFetchStart *int64 `json:"lastFetchStartAt"`
 	LastFetchEnd   *int64 `json:"lastFetchEndAt"`
 	LastSuccessAt  *int64 `json:"lastSuccessAt"`
@@ -372,6 +375,30 @@ type MailboxStatus struct {
 	LastError      string `json:"lastError"`
 	UIDValidity    uint32 `json:"uidValidity"`
 	NextUID        uint32 `json:"nextUid"`
+	// Configured is false for a mailbox no longer in IMAP_MAILBOXES; it is
+	// shown for history but ignored for staleness.
+	Configured bool `json:"configured"`
+}
+
+// ReportersResponse is GET /api/reporters?domain=&from=&to=&tz=: every
+// receiver that ever sent an aggregate report for the domain filter, with
+// its activity in the range and its last report overall.
+type ReportersResponse struct {
+	Range     Range      `json:"range"`
+	Reporters []Reporter `json:"reporters"`
+}
+
+type Reporter struct {
+	Org     string   `json:"org"`
+	Domains []string `json:"domains"`
+	// Reports and Messages count original aggregate reports in the range.
+	Reports  int64 `json:"reports"`
+	Messages int64 `json:"messages"`
+	// FirstReportAt and LastReportAt are window ends over all history.
+	FirstReportAt int64 `json:"firstReportAt"`
+	LastReportAt  int64 `json:"lastReportAt"`
+	// Quiet uses the Overview quiet-reporter rule.
+	Quiet bool `json:"quiet"`
 }
 
 type ClassCount struct {
