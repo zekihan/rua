@@ -3,8 +3,10 @@ package query
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
@@ -627,22 +629,9 @@ func (svc *Service) newSources(
 		return result, nil
 	}
 
-	allRecords, err := svc.loadRecords(ctx, tx, rng, domain, false)
+	firstMid, err := svc.firstSeenBySource(ctx, tx, domain)
 	if err != nil {
 		return result, err
-	}
-
-	firstMid := make(map[string]int64)
-	firstDate := make(map[string]string)
-
-	for _, record := range allRecords {
-		key := record.source.Key
-		mid := midpoint(record.begin, record.end)
-
-		if current, ok := firstMid[key]; !ok || mid < current {
-			firstMid[key] = mid
-			firstDate[key] = record.date
-		}
 	}
 
 	for key, agg := range inRange {
@@ -655,7 +644,7 @@ func (svc *Service) newSources(
 			Key:       key,
 			Name:      agg.source.Name,
 			Kind:      agg.source.Kind,
-			FirstSeen: firstDate[key],
+			FirstSeen: civilFromTime(time.Unix(mid, 0), rng.loc).String(),
 			Messages:  agg.messages,
 			Pass:      agg.pass,
 			Forwarded: agg.forwarded,
@@ -673,6 +662,105 @@ func (svc *Service) newSources(
 	sortNewSources(result.expected)
 
 	return result, nil
+}
+
+type firstSeenRow struct {
+	SourceIP string `db:"source_ip"`
+	PTR      string `db:"ptr"`
+	ASOrg    string `db:"as_org"`
+	DKIMSet  string `db:"dkim_set"`
+	FirstMid int64  `db:"first_mid"`
+	ASN      int64  `db:"asn"`
+	PTRConf  int64  `db:"ptr_confirmed"`
+}
+
+// firstSeenBySource returns the earliest report midpoint per source key
+// over all history. SQL aggregates one row per (source IP, passing-DKIM
+// domain set) with MIN(midpoint), so only the narrow projection needed
+// for classification crosses into Go, never full record detail.
+func (svc *Service) firstSeenBySource(
+	ctx context.Context, tx *sqlx.Tx, domain string,
+) (map[string]int64, error) {
+	query := `SELECT source_ip, ptr, ptr_confirmed, asn, as_org, dkim_set,
+		MIN(mid) AS first_mid
+		FROM (
+			SELECT rec.source_ip AS source_ip,
+				COALESCE(ii.ptr, '') AS ptr,
+				COALESCE(ii.ptr_confirmed, 0) AS ptr_confirmed,
+				COALESCE(ii.asn, 0) AS asn,
+				COALESCE(ii.as_org, '') AS as_org,
+				((r.begin + r.end) / 2) AS mid,
+				COALESCE((
+					SELECT GROUP_CONCAT(dkim_domain, ',')
+					FROM (
+						SELECT DISTINCT ar.domain AS dkim_domain
+						FROM auth_results ar
+						WHERE ar.record = rec.id AND ar.method = 'dkim'
+							AND ar.result = 'pass'
+						ORDER BY ar.domain
+					)
+				), '') AS dkim_set
+			FROM records rec
+			JOIN reports r ON r.id = rec.report
+			LEFT JOIN ip_info ii ON ii.ip = rec.source_ip
+			WHERE r.duplicate_of IS NULL AND r.kind = 'dmarc-aggregate'`
+	args := []any{}
+
+	if domain != "" {
+		query += rDomainClause
+
+		args = append(args, domain)
+	}
+
+	query += `
+		) GROUP BY source_ip, ptr, ptr_confirmed, asn, as_org, dkim_set`
+
+	var rows []firstSeenRow
+
+	err := tx.SelectContext(ctx, &rows, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("load first-seen sources: %w", err)
+	}
+
+	set := svc.sourceSet()
+	firstMid := make(map[string]int64, len(rows))
+
+	for index := range rows {
+		row := &rows[index]
+
+		var domains []string
+
+		if row.DKIMSet != "" {
+			domains = strings.Split(row.DKIMSet, ",")
+		}
+
+		asn := uint32(0)
+		if row.ASN > 0 {
+			asn = uint32(row.ASN) //nolint:gosec // ASN from DB is non-negative.
+		}
+
+		var addr netip.Addr
+
+		parsedAddr, parseErr := netip.ParseAddr(strings.TrimSpace(row.SourceIP))
+		if parseErr == nil {
+			addr = parsedAddr
+		}
+
+		source := set.Classify(sources.Input{
+			IP:           addr,
+			PTR:          row.PTR,
+			PTRConfirmed: row.PTRConf != 0,
+			ASN:          asn,
+			ASOrg:        row.ASOrg,
+			DKIMDomains:  domains,
+		})
+
+		if current, ok := firstMid[source.Key]; !ok || row.FirstMid < current {
+			firstMid[source.Key] = row.FirstMid
+		}
+	}
+
+	return firstMid, nil
 }
 
 func sortNewSources(rows []NewSource) {

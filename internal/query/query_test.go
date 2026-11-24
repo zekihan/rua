@@ -962,6 +962,43 @@ func TestTLSViewsAndDomains(t *testing.T) {
 	eq(t, domains.Domains[0].TLSReports, int64(1))
 }
 
+func TestNewSourcesFirstSeen(t *testing.T) {
+	t.Parallel()
+
+	set, err := sources.Parse(
+		[]byte(
+			"- name: Mail provider\n  expected: true\n  match:\n    dkim_domains: [example.com]\n",
+		),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fx := newFixture(t, set)
+	// An established IP reporting before and inside the range.
+	fx.ingest(t, aggregateXML("Google", "seen-old", "example.com",
+		unixTime(2025, time.May, 1, 0), unixTime(2025, time.May, 3, 0), "reject", 100,
+		"192.0.2.9", 2, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+	fx.ingest(t, aggregateXML("Google", "seen-again", "example.com",
+		unixTime(2025, time.June, 9, 0), unixTime(2025, time.June, 11, 0), "reject", 100,
+		"192.0.2.9", 2, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+	// A genuinely new IP first seen inside the range, with a failing
+	// record whose DKIM domain matches no rule.
+	fx.ingest(t, aggregateXML("Google", "seen-new", "example.com",
+		unixTime(2025, time.June, 9, 0), unixTime(2025, time.June, 11, 0), "reject", 100,
+		"192.0.2.10", 6, "fail", "fail", "reject", "example.com", "other.net", "pass", "s1", ""))
+
+	overview := overviewFor(t, fx, "from=2025-06-01&to=2025-06-15&tz=UTC")
+
+	// The established IP classifies as the expected rule source and was
+	// first seen in May, so only the new unknown IP is listed.
+	eq(t, len(overview.NewUnknown), 1)
+	eq(t, overview.NewUnknown[0].Key, "ip:192.0.2.10")
+	eq(t, overview.NewUnknown[0].FirstSeen, "2025-06-10")
+	eq(t, overview.NewUnknown[0].Messages, int64(6))
+	eq(t, len(overview.NewExpected), 0)
+}
+
 func TestQuietAndLongWindow(t *testing.T) {
 	t.Parallel()
 
