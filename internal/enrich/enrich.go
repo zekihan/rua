@@ -26,10 +26,11 @@ const (
 	retryAfter        = time.Hour
 	lookupTimeout     = 5 * time.Second
 	queuePollInterval = 10 * time.Minute
-	lookupsPerSecond  = 5
-	lookupBurst       = 1
-	notifyCapacity    = 1
-	confirmedFlag     = 1
+	// Each IP costs up to four DNS queries (PTR, forward, two TXT).
+	lookupsPerSecond = 2
+	lookupBurst      = 1
+	notifyCapacity   = 1
+	confirmedFlag    = 1
 )
 
 const queueQuery = `

@@ -172,7 +172,9 @@ func (worker *Worker) asOrg(ctx context.Context, asn uint32) (string, error) {
 		return "", err
 	}
 
-	worker.asnOrgs[asn] = org
+	if org != "" {
+		worker.asnOrgs[asn] = org
+	}
 
 	return org, nil
 }
