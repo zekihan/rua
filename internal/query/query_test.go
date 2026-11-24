@@ -773,6 +773,82 @@ func TestReportsPagination(t *testing.T) {
 	_ = badErr
 }
 
+func collectReportIDs(t *testing.T, fx *fixture, baseQuery string, pages int) []int64 {
+	t.Helper()
+
+	ids := []int64{}
+	cursor := ""
+
+	for range pages {
+		query := baseQuery
+		if cursor != "" {
+			query += "&cursor=" + url.QueryEscape(cursor)
+		}
+
+		page := reportsFor(t, fx, query)
+		for index := range page.Reports {
+			ids = append(ids, page.Reports[index].ID)
+		}
+
+		if page.NextCursor == "" {
+			break
+		}
+
+		cursor = page.NextCursor
+	}
+
+	return ids
+}
+
+func TestReportsPaginationWalk(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+
+	for index := range 6 {
+		day := 9 + index
+
+		ip := "192.0.2.1"
+		if index%2 == 1 {
+			ip = "192.0.2.2"
+		}
+
+		fx.ingest(t, aggregateXML("Google", fmt.Sprintf("page-%d", index), "example.com",
+			unixTime(2025, time.June, day, 0), unixTime(2025, time.June, day+2, 0),
+			"reject", 100, ip, 2, "pass", "fail", "none",
+			"example.com", "example.com", "pass", "s1", ""))
+	}
+
+	full := reportsFor(t, fx, "from=2025-06-01&to=2025-06-30&tz=UTC&limit=50")
+	eq(t, len(full.Reports), 6)
+
+	want := make([]int64, 0, len(full.Reports))
+	for index := range full.Reports {
+		want = append(want, full.Reports[index].ID)
+	}
+
+	got := collectReportIDs(t, fx, "from=2025-06-01&to=2025-06-30&tz=UTC&limit=2", 10)
+	eqSlice(t, got, want)
+
+	// Source-filtered pages collect only matching reports, in order.
+	filtered := collectReportIDs(
+		t, fx, "from=2025-06-01&to=2025-06-30&tz=UTC&limit=1&source=ip%3A192.0.2.2", 10,
+	)
+	eq(t, len(filtered), 3)
+
+	for _, id := range filtered {
+		found := false
+
+		for _, wantID := range want {
+			if id == wantID {
+				found = true
+			}
+		}
+
+		eq(t, found, true)
+	}
+}
+
 func TestBadCursor(t *testing.T) {
 	t.Parallel()
 

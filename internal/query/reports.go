@@ -304,60 +304,91 @@ func (svc *Service) listReportRows(
 	ctx context.Context, tx *sqlx.Tx, rng *resolvedRange, filter *Filter,
 	allowed map[int64]bool, hasCursor bool, cursorBegin, cursorID int64, limit int,
 ) ([]reportDBRow, error) {
-	query := `SELECT id, kind, message, blob, org, email, extra_contact, report_id,
+	baseQuery := `SELECT id, kind, message, blob, org, email, extra_contact, report_id,
 		begin, end, domain, schema, duplicate_of, conflict
 		FROM reports
 		WHERE ((begin + end) / 2) >= ? AND ((begin + end) / 2) < ?`
-	args := []any{rng.fromUnix, rng.toUnix}
+	baseArgs := []any{rng.fromUnix, rng.toUnix}
 
 	if filter.Domain != "" {
-		query += domainClause
+		baseQuery += domainClause
 
-		args = append(args, filter.Domain)
+		baseArgs = append(baseArgs, filter.Domain)
 	}
 
 	if filter.Reporter != "" {
-		query += ` AND org = ?`
+		baseQuery += ` AND org = ?`
 
-		args = append(args, filter.Reporter)
+		baseArgs = append(baseArgs, filter.Reporter)
 	}
 
 	if filter.Kind != "" {
-		query += ` AND kind = ?`
+		baseQuery += ` AND kind = ?`
 
-		args = append(args, filter.Kind)
+		baseArgs = append(baseArgs, filter.Kind)
 	}
 
-	if hasCursor {
-		query += ` AND (begin < ? OR (begin = ? AND id < ?))`
+	page := func(
+		withCursor bool, begin, id int64, count int,
+	) ([]reportDBRow, error) {
+		query := baseQuery
 
-		args = append(args, cursorBegin, cursorBegin, cursorID)
+		args := append([]any{}, baseArgs...)
+
+		if withCursor {
+			query += ` AND (begin < ? OR (begin = ? AND id < ?))`
+
+			args = append(args, begin, begin, id)
+		}
+
+		query += ` ORDER BY begin DESC, id DESC LIMIT ?`
+
+		args = append(args, count)
+
+		var rows []reportDBRow
+
+		err := tx.SelectContext(ctx, &rows, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("list reports: %w", err)
+		}
+
+		return rows, nil
 	}
 
-	query += ` ORDER BY begin DESC, id DESC`
-
-	var rows []reportDBRow
-
-	err := tx.SelectContext(ctx, &rows, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list reports: %w", err)
+	if filter.Source == "" {
+		return page(hasCursor, cursorBegin, cursorID, limit+1)
 	}
 
-	if filter.Source != "" {
-		filtered := make([]reportDBRow, 0, len(rows))
+	// Source-filtered: walk keyset pages in SQL until limit+1 matches
+	// are collected, instead of loading every report in the range.
+	collected := make([]reportDBRow, 0, limit+1)
+	withCursor, begin, id := hasCursor, cursorBegin, cursorID
 
-		for index := range rows {
-			if allowed[rows[index].ID] {
-				filtered = append(filtered, rows[index])
+	for {
+		batch, err := page(withCursor, begin, id, limit+1)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(batch) == 0 {
+			break
+		}
+
+		for index := range batch {
+			if allowed[batch[index].ID] {
+				collected = append(collected, batch[index])
 			}
 		}
 
-		rows = filtered
+		if len(collected) > limit || len(batch) < limit+1 {
+			break
+		}
+
+		last := batch[len(batch)-1]
+		withCursor, begin, id = true, last.Begin, last.ID
 	}
 
-	_ = limit
-
-	return rows, nil
+	return collected, nil
 }
 
 func (svc *Service) fillReports(
