@@ -2,7 +2,6 @@ package dmarc
 
 import (
 	"errors"
-	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -208,7 +207,7 @@ func TestAggregateQuirks(t *testing.T) {
 
 	want := report.Record{
 		SourceIP:     "203.0.113.40",
-		Count:        math.MaxInt64,
+		Count:        report.MaxCount,
 		Disposition:  "pass",
 		DKIM:         "pass",
 		SPF:          "fail",
@@ -297,8 +296,8 @@ func TestAggregateRejectsInvalidDocuments(t *testing.T) {
 		"reversed dates":   strings.Replace(base, "1704067200", "1704153600", 1),
 		"invalid IP":       strings.Replace(base, "203.0.113.40", "203.0.113.400", 1),
 		"scoped IPv6":      strings.Replace(base, "203.0.113.40", "2001:db8::20%zone", 1),
-		"negative count":   strings.Replace(base, "9223372036854775807", "-1", 1),
-		"overflowed count": strings.Replace(base, "9223372036854775807", "9223372036854775808", 1),
+		"negative count":   strings.Replace(base, "1099511627776", "-1", 1),
+		"overflowed count": strings.Replace(base, "1099511627776", "1099511627777", 1),
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {

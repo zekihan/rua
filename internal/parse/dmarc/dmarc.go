@@ -240,7 +240,7 @@ func (wire *row) record() (report.Record, error) {
 	}
 
 	count, err := strconv.ParseInt(strings.TrimSpace(wire.Count), 10, 64)
-	if err != nil || count < 0 {
+	if err != nil || count < 0 || count > report.MaxCount {
 		return report.Record{}, errRecordCount
 	}
 

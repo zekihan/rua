@@ -16,7 +16,7 @@ import (
 var (
 	errMetadata        = errors.New("missing or invalid TLS report metadata")
 	errDomain          = errors.New("missing TLS policy domain")
-	errSessionCount    = errors.New("negative TLS session count")
+	errSessionCount    = errors.New("invalid TLS session count")
 	errTooManyFailures = errors.New("too many TLS failure details")
 	errFailureArray    = errors.New("TLS failure details must be an array")
 )
@@ -166,7 +166,7 @@ func (wire *policy) parsed() (report.TLSPolicy, error) {
 		return report.TLSPolicy{}, errDomain
 	}
 
-	if wire.Summary.Success < 0 || wire.Summary.Failure < 0 {
+	if !validCount(wire.Summary.Success) || !validCount(wire.Summary.Failure) {
 		return report.TLSPolicy{}, errSessionCount
 	}
 
@@ -189,7 +189,7 @@ func (wire *policy) parsed() (report.TLSPolicy, error) {
 
 	for index := range wire.Failures {
 		entry := &wire.Failures[index]
-		if entry.Count < 0 {
+		if !validCount(entry.Count) {
 			return report.TLSPolicy{}, errSessionCount
 		}
 
@@ -215,4 +215,8 @@ func (wire *failure) parsed() report.TLSFailure {
 		AdditionalInfoURI:   text.Limit(uri, report.MaxLong),
 		FailedSessions:      wire.Count,
 	}
+}
+
+func validCount(count int64) bool {
+	return count >= 0 && count <= report.MaxCount
 }

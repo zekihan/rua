@@ -35,6 +35,9 @@ const (
 	// MaxRecords caps records per aggregate report and failure details per
 	// TLS policy; a report exceeding it fails to parse.
 	MaxRecords = 100_000
+	// MaxCount caps a record's message count and every TLS session count,
+	// so sums over MaxRecords values cannot overflow int64.
+	MaxCount = 1 << 40
 )
 
 // Aggregate is one DMARC aggregate report (RFC 7489 appendix C or the

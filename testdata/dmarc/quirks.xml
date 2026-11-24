@@ -6,7 +6,7 @@
   <policy_published><domain> EXAMPLE.COM </domain><p> NONE </p><pct> 0 </pct></policy_published>
   <record>
     <row>
-      <source_ip> 203.0.113.40 </source_ip><count> 9223372036854775807 </count>
+      <source_ip> 203.0.113.40 </source_ip><count> 1099511627776 </count>
       <policy_evaluated>
         <disposition> PASS </disposition><dkim> PASS </dkim><spf> FAIL </spf>
         <reason><type> FORWARDED </type><comment> via example.org </comment></reason>
