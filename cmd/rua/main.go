@@ -278,7 +278,7 @@ func serveDemo(ctx context.Context, cfg *config.Config) error {
 
 	pipeline := newPipeline(st, cfg, nil, nil)
 
-	err = demo.Generate(ctx, pipeline, time.Now())
+	err = demo.Generate(ctx, st, pipeline, time.Now())
 	if err != nil {
 		return fmt.Errorf("generate demo data: %w", err)
 	}
