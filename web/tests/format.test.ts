@@ -65,3 +65,10 @@ test("report windows are compact and follow the selected tz", () => {
   );
   assert.equal(formatUnixWindow(null, end, "UTC"), "—");
 });
+
+test("timestamps outside the Date range render a placeholder", () => {
+  const huge = 9e15;
+  assert.equal(formatUnixDate(huge, "UTC"), "—");
+  assert.equal(formatUnixDateTime(-huge, "UTC"), "—");
+  assert.equal(formatUnixWindow(1, huge, "UTC"), "—");
+});
