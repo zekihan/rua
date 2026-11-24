@@ -8,6 +8,9 @@ require (
 	github.com/klauspost/compress v1.20.5
 	github.com/sethvargo/go-envconfig/v2 v2.0.0
 	github.com/zekihan/go-commons v1.2.0
+	go.yaml.in/yaml/v3 v3.0.6
+	golang.org/x/net v0.63.0
+	golang.org/x/time v0.16.0
 	modernc.org/sqlite v1.63.0
 )
 
@@ -26,7 +29,7 @@ require (
 	github.com/valyala/fastrand v1.1.0 // indirect
 	github.com/valyala/histogram v1.2.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
