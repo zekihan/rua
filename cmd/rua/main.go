@@ -40,6 +40,7 @@ const (
 	shutdownTimeout   = 10 * time.Second
 	metricsInterval   = time.Minute
 	pruneInterval     = 24 * time.Hour
+	reparseRetry      = 15 * time.Minute
 	exitUsage         = 2
 )
 
@@ -222,12 +223,14 @@ func serve(ctx context.Context, cfg *config.Config) error {
 	background(ctx, "Source rules reload", loader.Run)
 	background(ctx, "Enrichment", worker.Run)
 	background(ctx, "Reparse", func(ctx context.Context) error {
-		_, err := pipeline.ReparseIfNeeded(ctx)
-		if err != nil {
-			return fmt.Errorf("reparse: %w", err)
-		}
+		return untilDone(ctx, reparseRetry, func(ctx context.Context) error {
+			_, err := pipeline.ReparseIfNeeded(ctx)
+			if err != nil {
+				return fmt.Errorf("reparse: %w", err)
+			}
 
-		return nil
+			return nil
+		})
 	})
 	background(ctx, "Retention", func(ctx context.Context) error {
 		return every(ctx, pruneInterval, func(ctx context.Context) error {
@@ -394,6 +397,27 @@ func every(ctx context.Context, interval time.Duration, fn func(context.Context)
 		case <-ctx.Done():
 			return fmt.Errorf("periodic task: %w", ctx.Err())
 		case <-ticker.C:
+		}
+	}
+}
+
+// untilDone runs fn until it succeeds, retrying after interval.
+func untilDone(ctx context.Context, interval time.Duration, fn func(context.Context) error) error {
+	for {
+		err := fn(ctx)
+		if err == nil {
+			return nil
+		}
+
+		slog.WarnContext(ctx, "Task failed, retrying", slog.Any("error", err))
+
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+
+			return fmt.Errorf("retry: %w", ctx.Err())
+		case <-timer.C:
 		}
 	}
 }
