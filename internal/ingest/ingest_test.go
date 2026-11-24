@@ -319,7 +319,7 @@ func TestOtherFailureAndSkip(t *testing.T) {
 	assertEqual(t, failure.Status, StatusOK)
 
 	headers := []byte("From: sender@example.test\r\nSubject: caf\xff")
-	source := Source{Mailbox: "INBOX", UID: 42, InternalDate: testNow}
+	source := Source{Mailbox: "INBOX", UID: 42, UIDValidity: 0, InternalDate: testNow}
 	skipped, err := pipe.Skip(t.Context(), headers, 1000, source)
 	mustSucceed(t, err)
 	assertEqual(t, skipped.Status, StatusSkipped)
@@ -344,11 +344,61 @@ func TestOtherFailureAndSkip(t *testing.T) {
 		scalar[int64](t, st, "SELECT internaldate FROM messages WHERE id=?", skipped.MessageID),
 		testNow.Unix(),
 	)
-	assertEqual(
-		t,
-		mustIngest(t, pipe, headers),
-		Result{Known: true, Class: "", Status: "", MessageID: 0, Reports: 0},
-	)
+
+	ingested := mustIngest(t, pipe, headers)
+	if ingested.Known || ingested.MessageID == skipped.MessageID {
+		t.Fatalf("skip digest collided with the raw message: %+v", ingested)
+	}
+}
+
+func TestSkipIdenticalHeaders(t *testing.T) {
+	fakeParsers(t)
+
+	pipe, st := fixtureStore(t, defaultOptions())
+	headers := []byte("From: sender@example.test\r\nSubject: same\r\n")
+	firstSrc := Source{Mailbox: "INBOX", UID: 1, UIDValidity: 9, InternalDate: testNow}
+
+	first, err := pipe.Skip(t.Context(), headers, 1000, firstSrc)
+	mustSucceed(t, err)
+
+	second, err := pipe.Skip(t.Context(), headers, 1100, Source{
+		Mailbox: "INBOX", UID: 2, UIDValidity: 9, InternalDate: testNow,
+	})
+	mustSucceed(t, err)
+
+	if second.Known || second.MessageID == first.MessageID {
+		t.Fatalf("identical headers collapsed: %+v %+v", first, second)
+	}
+
+	again, err := pipe.Skip(t.Context(), headers, 1100, Source{
+		Mailbox: "INBOX", UID: 2, UIDValidity: 9, InternalDate: testNow,
+	})
+	mustSucceed(t, err)
+
+	if !again.Known {
+		t.Fatal("same mailbox, uidvalidity and uid was stored again")
+	}
+
+	otherBox, err := pipe.Skip(t.Context(), headers, 1100, Source{
+		Mailbox: "Other", UID: 2, UIDValidity: 9, InternalDate: testNow,
+	})
+	mustSucceed(t, err)
+
+	if otherBox.Known {
+		t.Fatal("mailbox was ignored")
+	}
+
+	otherGen, err := pipe.Skip(t.Context(), headers, 1100, Source{
+		Mailbox: "INBOX", UID: 2, UIDValidity: 10, InternalDate: testNow,
+	})
+	mustSucceed(t, err)
+
+	if otherGen.Known {
+		t.Fatal("uidvalidity was ignored")
+	}
+
+	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM messages"), 4)
+	assertEqual(t, scalar[int](t, st, "SELECT uid FROM messages WHERE id=?", first.MessageID), 1)
 }
 
 func TestExtractionLimits(t *testing.T) {

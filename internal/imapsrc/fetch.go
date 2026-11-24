@@ -150,7 +150,9 @@ func (fetcher *Fetcher) syncAndFetch(
 
 		var advanced int
 
-		next, advanced, err = fetcher.fetchBatch(ctx, session, name, uids[start:end], next)
+		next, advanced, err = fetcher.fetchBatch(
+			ctx, session, name, uids[start:end], next, info.UIDValidity,
+		)
 		count += advanced
 
 		if err != nil {
@@ -166,7 +168,7 @@ func (fetcher *Fetcher) fetchBatch(
 	session mailboxSession,
 	name string,
 	uids []uint32,
-	next uint32,
+	next, validity uint32,
 ) (uint32, int, error) {
 	meta, err := session.UIDFetch(ctx, uids, sectionMeta)
 	if err != nil {
@@ -190,7 +192,7 @@ func (fetcher *Fetcher) fetchBatch(
 			return next, advanced, fmt.Errorf("fetch UID %d: %w", uid, errUIDMissing)
 		}
 
-		err = fetcher.handoff(ctx, session, name, item)
+		err = fetcher.handoff(ctx, session, name, validity, item)
 		if err != nil {
 			return next, advanced, err
 		}
@@ -212,6 +214,7 @@ func (fetcher *Fetcher) handoff(
 	ctx context.Context,
 	session mailboxSession,
 	name string,
+	validity uint32,
 	item messageData,
 ) error {
 	section := sectionFull
@@ -238,7 +241,9 @@ func (fetcher *Fetcher) handoff(
 		return fmt.Errorf("fetch UID %d: %w", item.UID, errBodyMissing)
 	}
 
-	src := ingest.Source{Mailbox: name, UID: item.UID, InternalDate: item.InternalDate}
+	src := ingest.Source{
+		Mailbox: name, UID: item.UID, UIDValidity: validity, InternalDate: item.InternalDate,
+	}
 
 	if section == sectionHeader {
 		slog.InfoContext(ctx, "Skipped oversized message",

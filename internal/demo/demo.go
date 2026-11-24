@@ -367,7 +367,7 @@ func (gen *generator) ingest(
 	gen.uid++
 
 	_, err := pipe.Ingest(ctx, raw, ingest.Source{
-		Mailbox: mailboxDemo, UID: gen.uid, InternalDate: when,
+		Mailbox: mailboxDemo, UID: gen.uid, UIDValidity: 0, InternalDate: when,
 	})
 	if err != nil {
 		return fmt.Errorf("ingest demo message: %w", err)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ var (
 const (
 	headerFrom    = "From"
 	headerSubject = "Subject"
+	uint32Bytes   = 4
 )
 
 type messageWrite struct {
@@ -71,11 +73,13 @@ func (pipe *Pipeline) Ingest(ctx context.Context, raw []byte, src Source) (Resul
 }
 
 // Skip records the header and full size of a message that exceeded the
-// mailbox fetch limit. Its raw message blob is unavailable.
+// mailbox fetch limit. Its raw message blob is unavailable. The digest is
+// the header bytes plus the mailbox, UIDVALIDITY and UID, so two oversized
+// messages that share a header do not collapse into one row.
 func (pipe *Pipeline) Skip(
 	ctx context.Context, header []byte, size int64, src Source,
 ) (Result, error) {
-	return pipe.writeMessage(ctx, store.Digest(header), src, size, func(
+	return pipe.writeMessage(ctx, skipDigest(header, src), src, size, func(
 		_ context.Context, _ *sqlx.Tx, state *messageWrite,
 	) ([]byte, *message.Entity, error) {
 		state.result.Class = report.ClassOther
@@ -90,6 +94,28 @@ func (pipe *Pipeline) Skip(
 
 		return nil, entity, nil
 	})
+}
+
+// skipDigest is sha256(header || 0x00 || mailbox || 0x00 || uidvalidity || 0x00 || uid).
+func skipDigest(header []byte, src Source) []byte {
+	var num [uint32Bytes]byte
+
+	encoded := make(
+		[]byte, 0, len(header)+1+len(src.Mailbox)+1+uint32Bytes+1+uint32Bytes,
+	)
+	encoded = append(encoded, header...)
+	encoded = append(encoded, 0)
+	encoded = append(encoded, src.Mailbox...)
+	encoded = append(encoded, 0)
+
+	binary.BigEndian.PutUint32(num[:], src.UIDValidity)
+	encoded = append(encoded, num[:]...)
+	encoded = append(encoded, 0)
+
+	binary.BigEndian.PutUint32(num[:], src.UID)
+	encoded = append(encoded, num[:]...)
+
+	return store.Digest(encoded)
 }
 
 func (pipe *Pipeline) writeMessage(
