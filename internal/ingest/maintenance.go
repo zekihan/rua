@@ -205,7 +205,7 @@ func rebuildMessage(
 	blob := digest
 
 	if state.hasFailure {
-		sanitized := sanitizeMessage(raw)
+		sanitized := buildStoredCopy(raw, state.outcome())
 		if !bytes.Equal(sanitized, raw) {
 			blob, err = store.PutBlob(ctx, tx, sanitized)
 			if err != nil {

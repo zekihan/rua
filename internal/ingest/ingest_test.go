@@ -1037,7 +1037,7 @@ func TestExtractionLimits(t *testing.T) {
 	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM reports"), 0)
 
 	extract := newExtraction(func(document) error { return nil })
-	extract.remaining = int64(len(doc))
+	extract.reader.remaining = int64(len(doc))
 	err := extract.part(bytes.NewReader(doc), "", true)
 	mustSucceed(t, err)
 	err = extract.part(bytes.NewReader(doc), "", true)
