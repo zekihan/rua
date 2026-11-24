@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ApiError } from "../api/client.ts";
 
 export function PageHeading({
@@ -73,19 +73,52 @@ export function TableScroll({
   children,
   label,
   className = "",
+  scrollClassName = "",
 }: {
   children: ReactNode;
   label: string;
   className?: string;
+  scrollClassName?: string;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [more, setMore] = useState(false);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    // Show the cue while columns remain to the right of the visible area.
+    const update = () =>
+      setMore(
+        element.scrollLeft + element.clientWidth < element.scrollWidth - 1,
+      );
+    update();
+    element.addEventListener("scroll", update, { passive: true });
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => {
+      element.removeEventListener("scroll", update);
+      observer.disconnect();
+    };
+  }, []);
   return (
-    <div
-      className={`table-wrap ${className}`}
-      role="region"
-      tabIndex={0}
-      aria-label={label}
-    >
-      {children}
+    <div className={className}>
+      <div
+        ref={ref}
+        className={`table-wrap ${scrollClassName}`}
+        role="region"
+        tabIndex={0}
+        aria-label={label}
+      >
+        {children}
+      </div>
+      {more && (
+        <p
+          className="mt-1 text-right text-xs text-ink-3"
+          data-testid="table-scroll-cue"
+          aria-hidden="true"
+        >
+          More columns → scroll sideways
+        </p>
+      )}
     </div>
   );
 }

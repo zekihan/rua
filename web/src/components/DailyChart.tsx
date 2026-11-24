@@ -62,7 +62,7 @@ function DailyTable({
         Show as table
       </summary>
       <div className="mt-2">
-        <TableScroll label={`${label} as a table`} className="max-h-72">
+        <TableScroll label={`${label} as a table`} scrollClassName="max-h-72">
           <table data-testid="chart-table">
             <caption className="sr-only">{label}</caption>
             <thead className="sticky top-0">

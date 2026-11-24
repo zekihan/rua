@@ -280,6 +280,9 @@ test("sources can be sorted, filtered and opened", async ({ page }, info) => {
   const table = page.getByTestId("sources-table");
   await expect(table).toBeVisible();
   await checkPage(page, info, "sources");
+  const cue = page.getByTestId("table-scroll-cue");
+  if (isPhone(info)) await expect(cue.first()).toBeVisible();
+  else await expect(cue).toHaveCount(0);
   const count = await table.locator("tbody tr").count();
   await page.getByTestId("unknown-only-toggle").check();
   await expectUrlParam(page, "unknown", "1");
