@@ -140,6 +140,9 @@ func TestTLSRejectsInvalidDocuments(t *testing.T) {
 		"missing failure count": strings.Replace(
 			base, `, "total-failure-session-count": 4`, ``, 1,
 		),
+		"missing failed session count": strings.Replace(
+			base, `"failed-session-count": 4`, `"unknown": 4`, 1,
+		),
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {
