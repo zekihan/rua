@@ -33,9 +33,13 @@ const (
 )
 
 // Source says where a message came from. Mailbox is empty for imports.
+// UIDValidity is the mailbox generation observed when the message was
+// fetched. Skip includes it in the digest so identical headers from
+// different messages stay distinct.
 type Source struct { //nolint:govet // Preserve the public field order of Source literals.
 	Mailbox      string
 	UID          uint32
+	UIDValidity  uint32
 	InternalDate time.Time
 }
 

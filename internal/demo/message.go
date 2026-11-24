@@ -75,7 +75,7 @@ func (gen *generator) skip(ctx context.Context, pipe *ingest.Pipeline) error {
 	gen.uid++
 
 	_, err := pipe.Skip(ctx, header, oversizedBytes, ingest.Source{
-		Mailbox: mailboxDemo, UID: gen.uid, InternalDate: gen.now,
+		Mailbox: mailboxDemo, UID: gen.uid, UIDValidity: 0, InternalDate: gen.now,
 	})
 	if err != nil {
 		return fmt.Errorf("record oversized demo message: %w", err)

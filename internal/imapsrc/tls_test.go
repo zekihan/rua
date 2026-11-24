@@ -123,21 +123,23 @@ func TestPlaintextRequiresLoopback(t *testing.T) {
 
 	remote := filledConfig("example.com:993", tlsNone, "", "", "", nil, 0, 0)
 
-	_, err := dialIMAP(t.Context(), &remote)
+	var limits timeLimits
+
+	_, err := dialIMAP(t.Context(), &remote, limits)
 	if !errors.Is(err, errPlainLoopback) {
 		t.Fatalf("example.com: %v", err)
 	}
 
 	numeric := filledConfig("8.8.8.8:993", tlsNone, "", "", "", nil, 0, 0)
 
-	_, err = dialIMAP(t.Context(), &numeric)
+	_, err = dialIMAP(t.Context(), &numeric, limits)
 	if !errors.Is(err, errPlainLoopback) {
 		t.Fatalf("address: %v", err)
 	}
 
 	badMode := filledConfig("127.0.0.1:993", "plain", "", "", "", nil, 0, 0)
 
-	_, err = dialIMAP(t.Context(), &badMode)
+	_, err = dialIMAP(t.Context(), &badMode, limits)
 	if !errors.Is(err, errTLSMode) {
 		t.Fatalf("mode: %v", err)
 	}

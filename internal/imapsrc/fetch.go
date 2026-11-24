@@ -11,8 +11,9 @@ import (
 )
 
 var (
-	errUIDMissing  = errors.New("missing from response")
-	errBodyMissing = errors.New("missing body")
+	errUIDMissing         = errors.New("missing from response")
+	errBodyMissing        = errors.New("missing body")
+	errUIDValidityChanged = errors.New("uidvalidity changed")
 )
 
 func (fetcher *Fetcher) fetch(ctx context.Context) error {
@@ -33,7 +34,9 @@ func (fetcher *Fetcher) fetch(ctx context.Context) error {
 	defer func() {
 		logoutErr := session.Logout(ctx)
 		if logoutErr != nil && ctx.Err() == nil {
-			slog.WarnContext(ctx, "IMAP logout failed", slog.Any("error", logoutErr))
+			fetcher.log().WarnContext(ctx, "IMAP logout failed",
+				slog.String("error", clipError(logoutErr, fetcher.secrets()...)),
+			)
 		}
 	}()
 
@@ -55,7 +58,7 @@ func (fetcher *Fetcher) fetch(ctx context.Context) error {
 		}
 	}
 
-	return errors.Join(errs...)
+	return fetcher.safe(errors.Join(errs...))
 }
 
 func (fetcher *Fetcher) failMailboxes(ctx context.Context, cause error) error {
@@ -128,9 +131,13 @@ func (fetcher *Fetcher) syncAndFetch(
 		return 0, err
 	}
 
+	if fetcher.afterLoad != nil {
+		fetcher.afterLoad(name)
+	}
+
 	info, err := session.Examine(ctx, name)
 	if err != nil {
-		return 0, fmt.Errorf("examine mailbox: %w", err)
+		return 0, fmt.Errorf("examine: %w", err)
 	}
 
 	next, err := fetcher.syncValidity(ctx, name, row, info.UIDValidity)
@@ -140,7 +147,7 @@ func (fetcher *Fetcher) syncAndFetch(
 
 	uids, err := session.UIDSearch(ctx, next)
 	if err != nil {
-		return 0, fmt.Errorf("search mailbox: %w", err)
+		return 0, fmt.Errorf("search: %w", err)
 	}
 
 	count := 0
@@ -150,7 +157,9 @@ func (fetcher *Fetcher) syncAndFetch(
 
 		var advanced int
 
-		next, advanced, err = fetcher.fetchBatch(ctx, session, name, uids[start:end], next)
+		next, advanced, err = fetcher.fetchBatch(
+			ctx, session, name, uids[start:end], next, info.UIDValidity,
+		)
 		count += advanced
 
 		if err != nil {
@@ -166,11 +175,11 @@ func (fetcher *Fetcher) fetchBatch(
 	session mailboxSession,
 	name string,
 	uids []uint32,
-	next uint32,
+	next, validity uint32,
 ) (uint32, int, error) {
-	meta, err := session.UIDFetch(ctx, uids, sectionMeta)
+	meta, err := session.UIDFetch(ctx, uids, sectionMeta, 0)
 	if err != nil {
-		return next, 0, fmt.Errorf("fetch metadata: %w", err)
+		return next, 0, fmt.Errorf("fetch: %w", err)
 	}
 
 	byUID := make(map[uint32]messageData, len(meta))
@@ -180,6 +189,9 @@ func (fetcher *Fetcher) fetchBatch(
 
 	advanced := 0
 
+	// Metadata is read uidBatch UIDs at a time. Each body is fetched on its
+	// own so memory stays bounded by one message, or by a truncated header
+	// when the message is oversized, instead of the whole batch.
 	for _, uid := range uids {
 		if uid < next {
 			continue
@@ -190,14 +202,14 @@ func (fetcher *Fetcher) fetchBatch(
 			return next, advanced, fmt.Errorf("fetch UID %d: %w", uid, errUIDMissing)
 		}
 
-		err = fetcher.handoff(ctx, session, name, item)
+		err = fetcher.handoff(ctx, session, name, validity, item)
 		if err != nil {
 			return next, advanced, err
 		}
 
 		next = advanceUID(uid)
 
-		err = fetcher.saveNextUID(ctx, name, next)
+		err = fetcher.saveNextUID(ctx, name, validity, next)
 		if err != nil {
 			return next, advanced, err
 		}
@@ -212,6 +224,7 @@ func (fetcher *Fetcher) handoff(
 	ctx context.Context,
 	session mailboxSession,
 	name string,
+	validity uint32,
 	item messageData,
 ) error {
 	section := sectionFull
@@ -219,37 +232,55 @@ func (fetcher *Fetcher) handoff(
 		section = sectionHeader
 	}
 
-	bodies, err := session.UIDFetch(ctx, []uint32{item.UID}, section)
+	bodies, err := session.UIDFetch(
+		ctx,
+		[]uint32{item.UID},
+		section,
+		literalKeep(section, item.Size, fetcher.cfg.MaxMessageBytes),
+	)
 	if err != nil {
-		return fmt.Errorf("fetch body: %w", err)
+		return fmt.Errorf("fetch: %w", err)
 	}
 
-	var body []byte
+	var fetched messageData
 
-	for _, fetched := range bodies {
-		if fetched.UID == item.UID {
-			body = fetched.Body
+	found := false
+
+	for _, candidate := range bodies {
+		if candidate.UID == item.UID {
+			fetched = candidate
+			found = true
 
 			break
 		}
 	}
 
-	if body == nil {
+	if !found || !fetched.HaveBody {
 		return fmt.Errorf("fetch UID %d: %w", item.UID, errBodyMissing)
 	}
 
-	src := ingest.Source{Mailbox: name, UID: item.UID, InternalDate: item.InternalDate}
+	src := ingest.Source{
+		Mailbox:      name,
+		UID:          item.UID,
+		UIDValidity:  validity,
+		InternalDate: item.InternalDate,
+	}
 
-	if section == sectionHeader {
-		slog.InfoContext(ctx, "Skipped oversized message",
+	if section == sectionHeader || fetched.Oversized {
+		size := item.Size
+		if fetched.Oversized {
+			size = oversizedSize(item.Size, fetcher.cfg.MaxMessageBytes)
+		}
+
+		fetcher.log().InfoContext(ctx, "Skipped oversized message",
 			slog.String("mailbox", name),
 			slog.Uint64("uid", uint64(item.UID)),
-			slog.Int64("size", item.Size),
+			slog.Int64("size", size),
 		)
 
-		_, err = fetcher.sink.Skip(ctx, body, item.Size, src)
+		_, err = fetcher.sink.Skip(ctx, fetched.Body, size, src)
 	} else {
-		_, err = fetcher.sink.Ingest(ctx, body, src)
+		_, err = fetcher.sink.Ingest(ctx, fetched.Body, src)
 	}
 
 	if err != nil {
@@ -257,6 +288,15 @@ func (fetcher *Fetcher) handoff(
 	}
 
 	return nil
+}
+
+func oversizedSize(claimed, maxBytes int64) int64 {
+	floor := maxBytes + 1
+	if claimed > floor {
+		return claimed
+	}
+
+	return floor
 }
 
 func advanceUID(uid uint32) uint32 {
@@ -278,12 +318,16 @@ func (fetcher *Fetcher) syncValidity(
 	}
 
 	if row.UIDValidity != 0 {
-		err := fetcher.resetValidity(ctx, name, row.UIDValidity, observed)
-		if err != nil {
-			return 0, err
+		applied, resetErr := fetcher.resetValidity(ctx, name, row.UIDValidity, observed)
+		if resetErr != nil {
+			return 0, resetErr
 		}
 
-		slog.WarnContext(ctx, "UIDVALIDITY reset",
+		if !applied {
+			return fetcher.reloadNext(ctx, name, observed)
+		}
+
+		fetcher.log().WarnContext(ctx, "UIDVALIDITY reset",
 			slog.String("mailbox", name),
 			slog.Uint64("old", uint64(row.UIDValidity)),
 			slog.Uint64("new", uint64(observed)),
@@ -292,12 +336,33 @@ func (fetcher *Fetcher) syncValidity(
 		return 1, nil
 	}
 
-	err := fetcher.saveUIDValidity(ctx, name, observed)
+	applied, err := fetcher.saveUIDValidity(ctx, name, observed)
 	if err != nil {
 		return 0, err
 	}
 
+	if !applied {
+		return fetcher.reloadNext(ctx, name, observed)
+	}
+
 	return normalizeNext(row.NextUID), nil
+}
+
+func (fetcher *Fetcher) reloadNext(
+	ctx context.Context,
+	name string,
+	observed uint32,
+) (uint32, error) {
+	fresh, err := fetcher.loadMailbox(ctx, name)
+	if err != nil {
+		return 0, err
+	}
+
+	if fresh.UIDValidity != observed {
+		return 0, fmt.Errorf("mailbox %s: %w", name, errUIDValidityChanged)
+	}
+
+	return normalizeNext(fresh.NextUID), nil
 }
 
 func normalizeNext(next uint32) uint32 {

@@ -28,11 +28,14 @@ func randomJitter() int64 {
 }
 
 // scheduleDelay is the pause before the next attempt.
-// A successful attempt and the first failure both wait Interval: the failed
-// attempt is retried at the next interval, then the wait doubles, up to
-// maxBackoff, while failures continue.
+// A successful attempt waits Interval even when that is longer than
+// maxBackoff. Failures wait Interval too, then double, and only that
+// failure backoff is capped at maxBackoff.
 func scheduleDelay(interval time.Duration, failures int) time.Duration {
 	delay := max(interval, 0)
+	if failures <= 0 {
+		return delay
+	}
 
 	if delay > maxBackoff {
 		return maxBackoff
@@ -72,7 +75,7 @@ func applyJitter(base time.Duration, percent int64) time.Duration {
 
 func (fetcher *Fetcher) nextDelay(failures int) time.Duration {
 	delay := applyJitter(scheduleDelay(fetcher.cfg.Interval, failures), fetcher.jitterN())
-	if delay > maxBackoff {
+	if failures > 0 && delay > maxBackoff {
 		return maxBackoff
 	}
 

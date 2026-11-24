@@ -19,8 +19,6 @@ const (
 	tlsImplicit = "tls"
 	tlsStart    = "starttls"
 	tlsNone     = "none"
-
-	dialTimeout = 30 * time.Second
 )
 
 var (
@@ -41,7 +39,7 @@ func (fetcher *Fetcher) connect(ctx context.Context) (*imapSession, error) {
 			}
 		}
 
-		session, err := dialIMAP(ctx, &fetcher.cfg)
+		session, err := dialIMAP(ctx, &fetcher.cfg, fetcher.limits)
 		if err == nil {
 			return session, nil
 		}
@@ -50,17 +48,17 @@ func (fetcher *Fetcher) connect(ctx context.Context) (*imapSession, error) {
 			return nil, err
 		}
 
-		last = scrub(err, fetcher.cfg.Password)
-		slog.WarnContext(ctx, "IMAP connect failed",
+		last = fetcher.safe(err)
+		fetcher.log().WarnContext(ctx, "IMAP connect failed",
 			slog.Int("attempt", attempt+1),
-			slog.Any("error", last),
+			slog.String("error", clipError(last, fetcher.secrets()...)),
 		)
 	}
 
-	return nil, fmt.Errorf("connect IMAP: %w", last)
+	return nil, fmt.Errorf("connect failed: %w", last)
 }
 
-func dialIMAP(ctx context.Context, cfg *Config) (*imapSession, error) {
+func dialIMAP(ctx context.Context, cfg *Config, limits timeLimits) (*imapSession, error) {
 	switch cfg.TLSMode {
 	case tlsImplicit, tlsStart, tlsNone:
 	default:
@@ -71,27 +69,64 @@ func dialIMAP(ctx context.Context, cfg *Config) (*imapSession, error) {
 		return nil, errPlainLoopback
 	}
 
-	conn, err := dialTCP(ctx, cfg.Addr)
+	limit := limits.commandFor()
+	attemptCtx, cancelAttempt := context.WithTimeout(ctx, limit)
+
+	conn, err := dialTCP(attemptCtx, cfg.Addr, limit)
 	if err != nil {
-		return nil, err
+		cancelAttempt()
+
+		return nil, finishStage(ctx, attemptCtx, stageConnect, err)
 	}
 
-	client, err := openClient(ctx, conn, cfg)
-	if err != nil {
-		return nil, err
+	// Parent cancellation and the attempt deadline both close the socket.
+	// The library's read timeout is cleared while it is idle, so a stall
+	// after accept would otherwise block until that timer is set again.
+	stopParent := context.AfterFunc(ctx, func() { closeNet(ctx, conn) })
+	stopAttempt := context.AfterFunc(attemptCtx, func() { closeNet(attemptCtx, conn) })
+	fail := func(stageErr error) (*imapSession, error) {
+		stopAttempt()
+		stopParent()
+		cancelAttempt()
+		closeNet(ctx, conn)
+
+		return nil, stageErr
 	}
 
-	err = login(client, cfg)
+	client, err := openClient(ctx, attemptCtx, conn, cfg)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 
-	return &imapSession{raw: client}, nil
+	err = loginClient(ctx, attemptCtx, client, cfg)
+	if err != nil {
+		return fail(err)
+	}
+
+	if ctx.Err() != nil {
+		return fail(contextError(ctx.Err()))
+	}
+
+	if !stopAttempt() {
+		return fail(redactedError("timeout during " + stageConnect))
+	}
+
+	cancelAttempt()
+
+	session := &imapSession{
+		raw:      client,
+		conn:     conn,
+		stop:     stopParent,
+		limits:   limits,
+		maxBytes: cfg.MaxMessageBytes,
+	}
+
+	return session, nil
 }
 
-func dialTCP(ctx context.Context, addr string) (net.Conn, error) {
+func dialTCP(ctx context.Context, addr string, limit time.Duration) (net.Conn, error) {
 	dialer := new(net.Dialer)
-	dialer.Timeout = dialTimeout
+	dialer.Timeout = limit
 
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -101,20 +136,28 @@ func dialTCP(ctx context.Context, addr string) (net.Conn, error) {
 	return conn, nil
 }
 
-func openClient(ctx context.Context, conn net.Conn, cfg *Config) (*imapclient.Client, error) {
+func openClient(
+	parent, attempt context.Context,
+	conn net.Conn,
+	cfg *Config,
+) (*imapclient.Client, error) {
 	switch cfg.TLSMode {
 	case tlsNone:
-		return greet(imapclient.New(conn, nil))
+		return greet(parent, attempt, imapclient.New(conn, nil))
 	case tlsImplicit:
-		return openImplicitTLS(ctx, conn, cfg)
+		return openImplicitTLS(parent, attempt, conn, cfg)
 	case tlsStart:
-		return openStartTLS(conn, cfg)
+		return openStartTLS(parent, attempt, conn, cfg)
 	default:
 		return nil, fmt.Errorf("%w: %q", errTLSMode, cfg.TLSMode)
 	}
 }
 
-func openImplicitTLS(ctx context.Context, conn net.Conn, cfg *Config) (*imapclient.Client, error) {
+func openImplicitTLS(
+	parent, attempt context.Context,
+	conn net.Conn,
+	cfg *Config,
+) (*imapclient.Client, error) {
 	tlsConfig, err := connectionTLS(cfg)
 	if err != nil {
 		return nil, closeConn(conn, err)
@@ -122,18 +165,22 @@ func openImplicitTLS(ctx context.Context, conn net.Conn, cfg *Config) (*imapclie
 
 	tlsConn := tls.Client(conn, tlsConfig)
 
-	err = tlsConn.HandshakeContext(ctx)
+	err = tlsConn.HandshakeContext(attempt)
 	if err != nil {
-		return nil, closeConn(conn, fmt.Errorf("IMAP TLS handshake: %w", err))
+		return nil, closeConn(conn, finishStage(parent, attempt, stageTLS, err))
 	}
 
 	options := new(imapclient.Options)
 	options.TLSConfig = tlsConfig
 
-	return greet(imapclient.New(tlsConn, options))
+	return greet(parent, attempt, imapclient.New(tlsConn, options))
 }
 
-func openStartTLS(conn net.Conn, cfg *Config) (*imapclient.Client, error) {
+func openStartTLS(
+	parent, attempt context.Context,
+	conn net.Conn,
+	cfg *Config,
+) (*imapclient.Client, error) {
 	tlsConfig, err := connectionTLS(cfg)
 	if err != nil {
 		return nil, closeConn(conn, err)
@@ -144,25 +191,27 @@ func openStartTLS(conn net.Conn, cfg *Config) (*imapclient.Client, error) {
 
 	client, err := imapclient.NewStartTLS(conn, options)
 	if err != nil {
-		return nil, fmt.Errorf("IMAP STARTTLS: %w", err)
-	}
-
-	return greet(client)
-}
-
-func greet(client *imapclient.Client) (*imapclient.Client, error) {
-	err := client.WaitGreeting()
-	if err != nil {
-		return nil, closeClient(client, fmt.Errorf("IMAP greeting: %w", err))
+		return nil, finishStage(parent, attempt, stageStartTLS, err)
 	}
 
 	return client, nil
 }
 
-func login(client *imapclient.Client, cfg *Config) error {
-	err := client.Login(cfg.Username, cfg.Password).Wait()
+func greet(parent, attempt context.Context, client *imapclient.Client) (*imapclient.Client, error) {
+	err := finishStage(parent, attempt, stageGreeting, client.WaitGreeting())
 	if err != nil {
-		return closeClient(client, fmt.Errorf("IMAP login: %w", scrub(err, cfg.Password)))
+		return nil, closeClient(client, err)
+	}
+
+	return client, nil
+}
+
+func loginClient(parent, attempt context.Context, client *imapclient.Client, cfg *Config) error {
+	err := client.Login(cfg.Username, cfg.Password).Wait()
+
+	err = finishStage(parent, attempt, stageLogin, err)
+	if err != nil {
+		return closeClient(client, err)
 	}
 
 	return nil
@@ -170,20 +219,30 @@ func login(client *imapclient.Client, cfg *Config) error {
 
 func closeConn(conn net.Conn, err error) error {
 	closeErr := conn.Close()
-	if closeErr != nil {
-		return errors.Join(err, fmt.Errorf("close IMAP connection: %w", closeErr))
+
+	if err != nil {
+		return err
 	}
 
-	return err
+	if closeErr != nil && !benignClose(closeErr) {
+		return redactedError(textConnectionClosed)
+	}
+
+	return nil
 }
 
 func closeClient(client *imapclient.Client, err error) error {
 	closeErr := client.Close()
-	if closeErr != nil && !benignClose(closeErr) {
-		return errors.Join(err, fmt.Errorf("close IMAP connection: %w", closeErr))
+
+	if err != nil {
+		return err
 	}
 
-	return err
+	if closeErr != nil && !benignClose(closeErr) {
+		return redactedError(textConnectionClosed)
+	}
+
+	return nil
 }
 
 // connectionTLS returns a TLS config whose root pool is a copy of the system

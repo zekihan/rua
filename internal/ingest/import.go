@@ -146,7 +146,9 @@ func (pipe *Pipeline) importMessage(
 
 	summary.Messages++
 
-	result, err := pipe.Ingest(ctx, raw, Source{InternalDate: date, Mailbox: "", UID: 0})
+	result, err := pipe.Ingest(ctx, raw, Source{
+		InternalDate: date, Mailbox: "", UID: 0, UIDValidity: 0,
+	})
 	switch {
 	case err != nil:
 		summary.Failed++
