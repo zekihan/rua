@@ -68,5 +68,6 @@ export interface ClassCount { class: string; status: string; messages: number }
 export interface MessageRow { mailbox: string; from: string; subject: string; class: string; status: string; error: string; id: number; internalDateAt: number; size: number; uid: number; hasRaw: boolean }
 export interface Event { kind: string; mailbox: string; detail: string; at: number }
 export interface FailureReport { domain: string; sourceIp: string; authFailure: string; from: string; to: string; subject: string; messageId: number; arrivalAt: number }
+export interface FetchResponse { status: string }
 export interface ErrorBody { error: ErrorDetail }
 export interface ErrorDetail { code: string; message: string }
