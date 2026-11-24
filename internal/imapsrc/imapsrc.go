@@ -6,6 +6,9 @@ package imapsrc
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/zekihan/rua/internal/ingest"
@@ -14,7 +17,6 @@ import (
 )
 
 var (
-	errNotImplemented = errors.New("not implemented")
 	// ErrRunning is returned by Trigger while a fetch runs.
 	ErrRunning = errors.New("a fetch is running")
 	// ErrCooldown is returned by Trigger within 5 minutes of the last
@@ -45,42 +47,234 @@ type Config struct {
 
 // State is the scheduler state shown on the Status page.
 type State struct {
-	Enabled       bool
-	Running       bool
 	NextFetch     time.Time // zero when not scheduled
 	CooldownUntil time.Time // zero when Fetch now is accepted
+	Enabled       bool
+	Running       bool
 }
 
 // Fetcher runs fetches. Fetches never overlap.
 type Fetcher struct {
-	cfg     Config
-	store   *store.Store
-	sink    Sink
-	metrics *telemetry.Metrics
+	nextFetch     time.Time
+	cooldownUntil time.Time
+	sink          Sink
+	database      *store.Store
+	metrics       *telemetry.Metrics
+	now           func() time.Time
+	after         func(time.Duration) (<-chan time.Time, func())
+	jitterN       func() int64
+	wake          chan struct{}
+	cfg           Config
+	mu            sync.Mutex
+	running       bool
 }
 
-// New returns a Fetcher. cfg.Addr empty means disabled.
-func New(cfg Config, st *store.Store, sink Sink, m *telemetry.Metrics) *Fetcher {
-	return &Fetcher{cfg: cfg, store: st, sink: sink, metrics: m}
+// New returns a Fetcher. An empty address disables IMAP.
+//
+//nolint:gocritic // hugeParam: Config is the exported constructor argument.
+func New(cfg Config, database *store.Store, sink Sink, metrics *telemetry.Metrics) *Fetcher {
+	fetcher := new(Fetcher)
+	fetcher.cfg = cfg
+	fetcher.database = database
+	fetcher.sink = sink
+	fetcher.metrics = metrics
+	fetcher.now = time.Now
+	fetcher.after = newTimer
+	fetcher.jitterN = randomJitter
+	fetcher.wake = make(chan struct{}, 1)
+
+	return fetcher
+}
+
+func newTimer(delay time.Duration) (<-chan time.Time, func()) {
+	timer := time.NewTimer(delay)
+
+	return timer.C, func() { timer.Stop() }
 }
 
 // FetchOnce runs one fetch of every mailbox.
-func (f *Fetcher) FetchOnce(ctx context.Context) error {
-	_ = ctx
+func (fetcher *Fetcher) FetchOnce(ctx context.Context) error {
+	err := fetcher.tryStart()
+	if err != nil {
+		return err
+	}
 
-	return errNotImplemented
+	defer fetcher.finish()
+
+	started := fetcher.now()
+	err = fetcher.fetch(ctx)
+
+	if isCancel(err) {
+		return err
+	}
+
+	fetcher.metrics.FetchFinished(fetcher.now().Sub(started).Seconds(), err == nil)
+
+	if err == nil {
+		fetcher.metrics.LastSuccess(fetcher.now().Unix())
+	}
+
+	return err
 }
 
 // Run fetches immediately, then on the schedule (with backoff while failing)
 // and on Trigger, until ctx is done.
-func (f *Fetcher) Run(ctx context.Context) error {
-	_ = ctx
+func (fetcher *Fetcher) Run(ctx context.Context) error {
+	if fetcher.cfg.Addr == "" {
+		return ErrDisabled
+	}
 
-	return errNotImplemented
+	select {
+	case <-fetcher.wake:
+	default:
+	}
+
+	failures := 0
+
+	for {
+		err := ctx.Err()
+		if err != nil {
+			return contextError(err)
+		}
+
+		err = fetcher.FetchOnce(ctx)
+		if isCancel(err) {
+			return err
+		}
+
+		switch {
+		case errors.Is(err, ErrRunning):
+		case err != nil:
+			failures++
+
+			slog.ErrorContext(ctx, "Fetch attempt failed", slog.Any("error", err))
+		default:
+			failures = 0
+		}
+
+		err = fetcher.wait(ctx, fetcher.nextDelay(failures))
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // Trigger requests a fetch now (the UI's "Fetch now").
-func (f *Fetcher) Trigger() error { return ErrDisabled }
+func (fetcher *Fetcher) Trigger() error {
+	fetcher.mu.Lock()
+	defer fetcher.mu.Unlock()
+
+	if fetcher.cfg.Addr == "" {
+		return ErrDisabled
+	}
+
+	if fetcher.running {
+		return ErrRunning
+	}
+
+	now := fetcher.now()
+	if now.Before(fetcher.cooldownUntil) {
+		return ErrCooldown
+	}
+
+	fetcher.cooldownUntil = now.Add(triggerCooldown)
+
+	select {
+	case fetcher.wake <- struct{}{}:
+	default:
+	}
+
+	return nil
+}
 
 // State returns the scheduler state.
-func (f *Fetcher) State() State { return State{} }
+func (fetcher *Fetcher) State() State {
+	fetcher.mu.Lock()
+	defer fetcher.mu.Unlock()
+
+	cooldown := fetcher.cooldownUntil
+	if !cooldown.After(fetcher.now()) {
+		cooldown = time.Time{}
+	}
+
+	return State{
+		Enabled:       fetcher.cfg.Addr != "",
+		Running:       fetcher.running,
+		NextFetch:     fetcher.nextFetch,
+		CooldownUntil: cooldown,
+	}
+}
+
+func (fetcher *Fetcher) tryStart() error {
+	fetcher.mu.Lock()
+	defer fetcher.mu.Unlock()
+
+	if fetcher.cfg.Addr == "" {
+		return ErrDisabled
+	}
+
+	if fetcher.running {
+		return ErrRunning
+	}
+
+	fetcher.running = true
+	fetcher.nextFetch = time.Time{}
+
+	return nil
+}
+
+func (fetcher *Fetcher) finish() {
+	fetcher.mu.Lock()
+	fetcher.running = false
+	fetcher.mu.Unlock()
+}
+
+func (fetcher *Fetcher) setNext(at time.Time) {
+	fetcher.mu.Lock()
+	fetcher.nextFetch = at
+	fetcher.mu.Unlock()
+}
+
+// wait blocks until delay elapses, Trigger fires, or ctx is done.
+func (fetcher *Fetcher) wait(ctx context.Context, delay time.Duration) error {
+	channel, stop := fetcher.after(delay)
+	fetcher.setNext(fetcher.now().Add(delay))
+
+	defer func() {
+		stop()
+		fetcher.setNext(time.Time{})
+	}()
+
+	select {
+	case <-ctx.Done():
+		return contextError(ctx.Err())
+	case <-channel:
+		return nil
+	case <-fetcher.wake:
+		return nil
+	}
+}
+
+func isCancel(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func contextError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("%w", err)
+}
+
+func (fetcher *Fetcher) sleep(ctx context.Context, delay time.Duration) error {
+	channel, stop := fetcher.after(delay)
+	defer stop()
+
+	select {
+	case <-ctx.Done():
+		return contextError(ctx.Err())
+	case <-channel:
+		return nil
+	}
+}
