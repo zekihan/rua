@@ -45,34 +45,77 @@ func (reader *bodyReader) account(data []byte, limit int64, err error) ([]byte, 
 	return data, nil
 }
 
-// readOriginalHeaders reads only the attached message's header block.
-func (reader *bodyReader) readOriginalHeaders(body io.Reader) ([]byte, error) {
+var (
+	errHeaderSeparator = errors.New("attached message has no blank line after its headers")
+	errHeaderSyntax    = errors.New("attached message headers are malformed")
+)
+
+// readOriginalHeaders reads only the attached message's header block and
+// fails closed: every line must be a header field or a continuation, so a
+// broken attachment never lets body text in. A full message
+// (message/rfc822) must also end its headers with a blank line; a
+// text/rfc822-headers part may end at EOF. Errors never carry the bytes.
+func (reader *bodyReader) readOriginalHeaders(
+	body io.Reader,
+	requireSeparator bool,
+) ([]byte, error) {
 	limit := min(MaxReportBytes, reader.remaining)
 	limited := io.LimitReader(body, limit+1)
 	buffered := bufio.NewReader(limited)
 
 	var data []byte
 
-	lineStart := true
-
 	for {
 		line, err := buffered.ReadSlice('\n')
-		data = append(data, line...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			return nil, errHeaderSyntax
+		}
 
-		continuation := errors.Is(err, bufio.ErrBufferFull)
-		if !continuation && err != nil && !errors.Is(err, io.EOF) {
+		if err != nil && !errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("read attached message headers: %w", err)
 		}
 
-		if err != nil && !continuation || lineStart && (bytes.Equal(line, []byte("\r\n")) ||
-			bytes.Equal(line, []byte("\n"))) {
+		if bytes.Equal(line, []byte("\r\n")) || bytes.Equal(line, []byte("\n")) {
 			break
 		}
 
-		lineStart = !continuation
+		if len(line) > 0 && !headerLine(line, len(data) == 0) {
+			return nil, errHeaderSyntax
+		}
+
+		data = append(data, line...)
+
+		if err != nil {
+			if requireSeparator {
+				return nil, errHeaderSeparator
+			}
+
+			break
+		}
 	}
 
 	return reader.account(data, limit, nil)
+}
+
+// headerLine reports whether line is a header field ("Name: value") or,
+// after the first line, a folded continuation.
+func headerLine(line []byte, first bool) bool {
+	if line[0] == ' ' || line[0] == '\t' {
+		return !first
+	}
+
+	colon := bytes.IndexByte(line, ':')
+	if colon <= 0 {
+		return false
+	}
+
+	for _, char := range bytes.TrimRight(line[:colon], " \t") {
+		if char < '!' || char > '~' {
+			return false
+		}
+	}
+
+	return true
 }
 
 type failureParts struct { //nolint:govet // Feedback, headers, presence: logical grouping.
@@ -244,7 +287,9 @@ func readFailurePart(
 		strings.EqualFold(mediaType, typeOriginalHeaders):
 		parts.hasHeaders = true
 
-		data, err := reader.readOriginalHeaders(entity.Body)
+		data, err := reader.readOriginalHeaders(
+			entity.Body, strings.EqualFold(mediaType, typeOriginal),
+		)
 		if err != nil {
 			parts.headerErr = err
 		} else {

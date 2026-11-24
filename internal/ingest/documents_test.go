@@ -236,3 +236,36 @@ func FuzzFailureStorage(f *testing.F) {
 		assertBlobsFreeOf(t, st, marker)
 	})
 }
+
+func TestMalformedOriginalHeadersNeverStoreBody(t *testing.T) {
+	feedback := "Feedback-Type: auth-failure\r\nVersion: 1\r\nAuth-Failure: dmarc\r\n" +
+		"Source-IP: 198.51.100.10\r\nReported-Domain: example.com\r\n"
+	cases := map[string]string{
+		"rfc822 without separator": "Content-Type: message/rfc822\r\n\r\n" +
+			"From: sender@example.com\r\nSubject: original\r\nBODY-MARKER private body",
+		"rfc822 body line with colon": "Content-Type: message/rfc822\r\n\r\n" +
+			"From: sender@example.com\r\nNote: BODY-MARKER private body",
+		"headers part with body text": "Content-Type: text/rfc822-headers\r\n\r\n" +
+			"From: sender@example.com\r\nBODY-MARKER private body\r\n",
+	}
+
+	for name, original := range cases {
+		t.Run(name, func(t *testing.T) {
+			pipe, st := fixtureStore(t, defaultOptions())
+			raw := []byte("From: reporter@example.net\r\nSubject: broken original\r\n" +
+				"MIME-Version: 1.0\r\n" +
+				multipart("report; report-type=feedback-report", "fb",
+					"Content-Type: message/feedback-report\r\n\r\n"+feedback, original))
+
+			result := mustIngest(t, pipe, raw)
+			assertNoRawBlob(t, st, result.MessageID)
+			assertBlobsFreeOf(t, st, "BODY-MARKER")
+			assertEqual(
+				t,
+				scalar[int](t, st,
+					"SELECT count(*) FROM documents WHERE instr(error, 'BODY-MARKER') > 0"),
+				0,
+			)
+		})
+	}
+}

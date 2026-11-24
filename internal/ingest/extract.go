@@ -153,7 +153,9 @@ func (ext *extraction) leaf(entity *message.Entity, mediaType string) error {
 		return nil
 	case strings.EqualFold(mediaType, typeOriginal),
 		strings.EqualFold(mediaType, typeOriginalHeaders):
-		data, err := ext.reader.readOriginalHeaders(entity.Body)
+		data, err := ext.reader.readOriginalHeaders(
+			entity.Body, strings.EqualFold(mediaType, typeOriginal),
+		)
 		if err != nil {
 			ext.appendDoc(docOriginalHeaders, nil, boundedText(err.Error(), report.MaxLong))
 
