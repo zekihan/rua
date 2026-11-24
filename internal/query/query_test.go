@@ -1081,6 +1081,32 @@ func TestStatusFreshAndMessageRaw(t *testing.T) {
 	eq(t, errors.Is(err, ErrNotFound), true)
 }
 
+func TestMessageRawWaitsForReprocessing(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+	fx.ingest(t, `<feedback/>`)
+
+	var id int64
+
+	err := fx.st.Read(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		return tx.GetContext(ctx, &id, `SELECT id FROM messages WHERE blob IS NOT NULL`)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = fx.svc.MessageRaw(t.Context(), id)
+	if err != nil {
+		t.Fatalf("current message: %v", err)
+	}
+
+	fx.exec(t, `UPDATE messages SET parser_version = 1 WHERE id = ?`, id)
+
+	_, _, err = fx.svc.MessageRaw(t.Context(), id)
+	eq(t, errors.Is(err, ErrUnavailable), true)
+}
+
 func TestStatusStaleConfiguredOnly(t *testing.T) {
 	t.Parallel()
 

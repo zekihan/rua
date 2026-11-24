@@ -12,6 +12,7 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
+	"github.com/zekihan/rua/internal/report"
 	"github.com/zekihan/rua/internal/store"
 )
 
@@ -831,15 +832,26 @@ func (svc *Service) MessageRaw(ctx context.Context, id int64) ([]byte, string, e
 	var data []byte
 
 	err := svc.deps.Store.Read(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
-		var blob []byte
+		var row struct {
+			Blob          []byte `db:"blob"`
+			ParserVersion int    `db:"parser_version"`
+		}
 
-		err := tx.GetContext(ctx, &blob, `SELECT blob FROM messages WHERE id = ?`, id)
+		err := tx.GetContext(ctx, &row,
+			`SELECT blob, parser_version FROM messages WHERE id = ?`, id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("%w: message %d", ErrNotFound, id)
 		}
 
 		if err != nil {
 			return fmt.Errorf("load message: %w", err)
+		}
+
+		blob := row.Blob
+		if len(blob) > 0 && row.ParserVersion < report.ParserVersion {
+			// An older parser may have stored a raw failure report, which
+			// the pending upgrade replaces with headers-only documents.
+			return fmt.Errorf("%w: message %d awaits reprocessing", ErrUnavailable, id)
 		}
 
 		if len(blob) > 0 {

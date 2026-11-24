@@ -53,6 +53,9 @@ const (
 var (
 	ErrBadRequest = errors.New("bad request")
 	ErrNotFound   = errors.New("not found")
+	// ErrUnavailable marks data that exists but cannot be served yet, such
+	// as a message stored by an older parser while its upgrade runs.
+	ErrUnavailable = errors.New("temporarily unavailable")
 )
 
 // Deps are the Service's collaborators. Func fields may be nil.

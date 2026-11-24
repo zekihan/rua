@@ -35,6 +35,9 @@ func handleQueryError(writer http.ResponseWriter, request *http.Request, err err
 		writeError(writer, http.StatusBadRequest, "bad_request", err.Error())
 	case errors.Is(err, query.ErrNotFound):
 		writeError(writer, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, query.ErrUnavailable):
+		writer.Header().Set("Retry-After", "60")
+		writeError(writer, http.StatusServiceUnavailable, "unavailable", err.Error())
 	default:
 		slog.ErrorContext(request.Context(), "API request failed", slog.Any("error", err))
 		writeError(
