@@ -39,31 +39,72 @@ func TestScheduleDelay(t *testing.T) {
 			t.Fatalf("failures %d: got %s, want %s", check.failures, got, check.want)
 		}
 	}
+}
 
-	if scheduleDelay(7*time.Hour, 1) != maxBackoff || scheduleDelay(-time.Second, 3) != 0 {
-		t.Fatal("bounds")
+func TestScheduleDelayBounds(t *testing.T) {
+	t.Parallel()
+
+	long := 8 * time.Hour
+	if scheduleDelay(7*time.Hour, 1) != maxBackoff {
+		t.Fatal("short failure was not capped")
 	}
+
+	if scheduleDelay(-time.Second, 3) != 0 {
+		t.Fatal("negative interval")
+	}
+
+	if scheduleDelay(long, 0) != long {
+		t.Fatal("success interval was capped")
+	}
+
+	if scheduleDelay(long, 1) != maxBackoff || scheduleDelay(long, 4) != maxBackoff {
+		t.Fatal("failure interval was not capped")
+	}
+}
+
+func TestNextDelay(t *testing.T) {
+	t.Parallel()
+
+	fetcher := new(Fetcher)
+	fetcher.cfg = filledConfig("", "", "", "", "", nil, maxBackoff, 0)
+	fetcher.jitterN = func() int64 { return maxJitterPercent }
+
+	want := applyJitter(maxBackoff, maxJitterPercent)
+	if fetcher.nextDelay(0) != want {
+		t.Fatalf("success delay = %s, want %s", fetcher.nextDelay(0), want)
+	}
+
+	long := 8 * time.Hour
+	fetcher.cfg.Interval = long
+
+	fetcher.jitterN = func() int64 { return 0 }
+	if fetcher.nextDelay(0) != long || fetcher.nextDelay(1) != maxBackoff {
+		t.Fatalf("long delay success %s failure %s", fetcher.nextDelay(0), fetcher.nextDelay(1))
+	}
+
+	fetcher.jitterN = func() int64 { return maxJitterPercent }
+	if fetcher.nextDelay(1) != maxBackoff {
+		t.Fatalf("failure jitter = %s", fetcher.nextDelay(1))
+	}
+
+	fetcher.cfg.Interval = maxBackoff
+
+	fetcher.jitterN = func() int64 { return -maxJitterPercent }
+
+	want = maxBackoff - maxBackoff/maxJitterPercent
+	if fetcher.nextDelay(0) != want {
+		t.Fatalf("negative jitter = %s, want %s", fetcher.nextDelay(0), want)
+	}
+}
+
+func TestJitterRange(t *testing.T) {
+	t.Parallel()
 
 	base := 100 * time.Second
 	if applyJitter(base, maxJitterPercent) != 110*time.Second ||
 		applyJitter(base, -maxJitterPercent) != 90*time.Second ||
 		applyJitter(base, 0) != base || applyJitter(0, maxJitterPercent) != 0 {
 		t.Fatal("jitter")
-	}
-
-	fetcher := new(Fetcher)
-	fetcher.cfg = filledConfig("", "", "", "", "", nil, maxBackoff, 0)
-
-	fetcher.jitterN = func() int64 { return maxJitterPercent }
-	if fetcher.nextDelay(0) != maxBackoff {
-		t.Fatalf("capped delay = %s", fetcher.nextDelay(0))
-	}
-
-	fetcher.jitterN = func() int64 { return -maxJitterPercent }
-
-	want := maxBackoff - maxBackoff/maxJitterPercent
-	if fetcher.nextDelay(0) != want {
-		t.Fatalf("negative jitter = %s, want %s", fetcher.nextDelay(0), want)
 	}
 
 	for range jitterSteps {
@@ -225,6 +266,43 @@ func TestRunBackoff(t *testing.T) {
 
 	if dials.Load() != 10 {
 		t.Fatalf("dials = %d", dials.Load())
+	}
+
+	cancel()
+
+	err := waitErr(t, errCh)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSuccessKeepsLongInterval(t *testing.T) {
+	t.Parallel()
+
+	built := newRig(t, []string{"Reports"})
+	built.create(t, "Reports")
+	built.fetcher.cfg.Interval = 8 * time.Hour
+
+	clock := newFakeClock(time.Unix(1_800_000_350, 0).UTC())
+	clock.install(built.fetcher)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- built.fetcher.Run(ctx)
+	}()
+
+	if got := clock.read(t); got != 8*time.Hour {
+		t.Fatalf("success wait %s", got)
+	}
+
+	built.deliver(t, "Reports", "late", "body", time.Unix(1_800_000_360, 0).UTC())
+	built.sink.setFailAll(true)
+	clock.Advance(8 * time.Hour)
+
+	if got := clock.read(t); got != maxBackoff {
+		t.Fatalf("failure wait %s", got)
 	}
 
 	cancel()
@@ -612,7 +690,13 @@ func openDB(t *testing.T) *store.Store {
 func waitErr(t *testing.T, errCh <-chan error) error {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	return waitErrFor(t, errCh, 5*time.Second)
+}
+
+func waitErrFor(t *testing.T, errCh <-chan error, limit time.Duration) error {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(t.Context(), limit)
 	defer cancel()
 
 	select {
