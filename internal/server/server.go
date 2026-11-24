@@ -96,7 +96,7 @@ func (srv *Server) serveFallback(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 
-	if request.Method != http.MethodGet {
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		http.NotFound(writer, request)
 
 		return
