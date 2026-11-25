@@ -47,7 +47,7 @@ export default function ReportDetail(p: PageProps) {
             href={messageRawHref(d.messageId)}
             download
           >
-            Download original message
+            Download stored message
           </a>
         )}
       </div>

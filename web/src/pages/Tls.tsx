@@ -8,7 +8,7 @@ import {
   PageHeading,
   TableScroll,
 } from "../components/ui.tsx";
-import { TLSBars } from "../components/DailyChart.tsx";
+import { TLSBars, TLSFailureBars } from "../components/DailyChart.tsx";
 import { formatNumber, formatUnixDateTime } from "../format.ts";
 
 export function TlsList(p: PageProps) {
@@ -85,9 +85,17 @@ export function TlsDomain(p: PageProps) {
         <TLSBars days={d.days} />
       </section>
       <section className="card">
+        <h2>Failed sessions per day</h2>
+        <TLSFailureBars days={d.days} />
+      </section>
+      <section className="card">
         <h2>Failure types</h2>
         {d.failures.length === 0 ? (
-          <Empty>No failures in this range.</Empty>
+          <Empty>
+            {d.failure > 0
+              ? "No failure details reported."
+              : "No failures in this range."}
+          </Empty>
         ) : (
           <TableScroll label="TLS failure types">
             <table className="min-w-[40rem]" data-testid="tls-failures-table">
@@ -142,7 +150,7 @@ export function TlsDomain(p: PageProps) {
                 {d.policies.map((pol, i) => (
                   <tr key={i}>
                     <td>{pol.type}</td>
-                    <td>{pol.domain}</td>
+                    <td className="whitespace-nowrap">{pol.domain}</td>
                     <td className="mono small">
                       {pol.strings.join(" ") || "—"}
                     </td>

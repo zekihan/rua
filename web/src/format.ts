@@ -22,27 +22,36 @@ export function formatBytes(n: number): string {
   }
   return `${v.toFixed(1)} ${units[i]}`;
 }
+// validDate turns unix seconds into a Date, or null when the value is
+// missing or outside the range Date can represent.
+function validDate(unixSeconds: number | null | undefined): Date | null {
+  if (!unixSeconds || !Number.isFinite(unixSeconds)) return null;
+  const date = new Date(unixSeconds * 1000);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
 export function formatUnixDate(
   unixSeconds: number | null | undefined,
   tz: string,
 ): string {
-  if (!unixSeconds) return "—";
+  const date = validDate(unixSeconds);
+  if (!date) return "—";
   try {
     return new Intl.DateTimeFormat("en-GB", {
       timeZone: tz || "UTC",
       year: "numeric",
       month: "short",
       day: "numeric",
-    }).format(new Date(unixSeconds * 1000));
+    }).format(date);
   } catch {
-    return new Date(unixSeconds * 1000).toISOString().slice(0, 10);
+    return date.toISOString().slice(0, 10);
   }
 }
 export function formatUnixDateTime(
   unixSeconds: number | null | undefined,
   tz: string,
 ): string {
-  if (!unixSeconds) return "—";
+  const date = validDate(unixSeconds);
+  if (!date) return "—";
   try {
     return new Intl.DateTimeFormat("en-GB", {
       timeZone: tz || "UTC",
@@ -52,9 +61,39 @@ export function formatUnixDateTime(
       hour: "2-digit",
       minute: "2-digit",
       hourCycle: "h23",
-    }).format(new Date(unixSeconds * 1000));
+    }).format(date);
   } catch {
-    return new Date(unixSeconds * 1000).toISOString();
+    return date.toISOString();
+  }
+}
+export function formatUnixWindow(
+  begin: number | null | undefined,
+  end: number | null | undefined,
+  tz: string,
+): string {
+  const start = validDate(begin);
+  const finish = validDate(end);
+  if (!start || !finish) return "—";
+  try {
+    const zone = tz || "UTC";
+    const day = new Intl.DateTimeFormat("en-GB", {
+      timeZone: zone,
+      day: "numeric",
+      month: "short",
+    });
+    const time = new Intl.DateTimeFormat("en-GB", {
+      timeZone: zone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    const startDay = day.format(start);
+    const endDay = day.format(finish);
+    return startDay === endDay
+      ? `${startDay} ${time.format(start)} – ${time.format(finish)}`
+      : `${startDay} ${time.format(start)} – ${endDay} ${time.format(finish)}`;
+  } catch {
+    return `${start.toISOString()} – ${finish.toISOString()}`;
   }
 }
 export function formatDateLabel(date: string): string {
@@ -71,4 +110,20 @@ export function formatDateLabel(date: string): string {
   } catch {
     return date;
   }
+}
+export function formatPending(n: number | null | undefined): string {
+  return n === null || n === undefined ? "—" : formatNumber(n);
+}
+
+const sourceKindLabels: Record<string, string> = {
+  rule: "Rule",
+  as: "ASN",
+  ptr: "PTR domain",
+  ip: "IP",
+};
+export function sourceKindLabel(kind: string): string {
+  return sourceKindLabels[kind] ?? kind;
+}
+export function plural(count: number, one: string, many: string): string {
+  return count === 1 ? one : many;
 }

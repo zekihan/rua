@@ -11,6 +11,8 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/jmoiron/sqlx"
+
 	"github.com/zekihan/rua/internal/ingest"
 	"github.com/zekihan/rua/internal/store"
 )
@@ -78,7 +80,7 @@ const (
 
 	oversizedBytes int64 = 250 << 20
 
-	mailboxDemo = "demo"
+	mailboxDemo = Mailbox
 
 	domainCom = "example.com"
 	domainNet = "example.net"
@@ -282,6 +284,36 @@ func Generate(
 	err = writeIPInfo(ctx, st, gen.now)
 	if err != nil {
 		return err
+	}
+
+	return writeMailbox(ctx, st, gen.now)
+}
+
+// Mailbox is the mailbox name the demo pretends to fetch from.
+const Mailbox = "Reports"
+
+// writeMailbox records a recent successful fetch so the Status page has a
+// mailbox row with its cursor and backlog.
+func writeMailbox(ctx context.Context, st *store.Store, now time.Time) error {
+	const (
+		demoUIDValidity = 1700000000
+		fetchSeconds    = 4
+		fetchAgo        = 12 * time.Minute
+	)
+
+	end := now.Add(-fetchAgo).Unix()
+
+	err := st.Write(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO mailboxes
+			(name, uidvalidity, next_uid, last_fetch_start, last_fetch_end, last_result,
+			 last_success, pending)
+			VALUES (?, ?, (SELECT count(*) + 1 FROM messages), ?, ?, 'ok', ?, 0)`,
+			Mailbox, demoUIDValidity, end-fetchSeconds, end, end)
+
+		return err //nolint:wrapcheck // Wrapped below.
+	})
+	if err != nil {
+		return fmt.Errorf("write demo mailbox: %w", err)
 	}
 
 	return nil

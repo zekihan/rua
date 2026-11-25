@@ -133,12 +133,64 @@ func TestTLSRejectsInvalidDocuments(t *testing.T) {
 			1,
 		),
 		"deep nesting": `{"unknown":` + nested + "," + strings.TrimPrefix(base, "{"),
+		"no summary":   strings.Replace(base, `"summary":`, `"unknown":`, 1),
+		"missing successful count": strings.Replace(
+			base, `"total-successful-session-count": 0,`, ``, 1,
+		),
+		"missing failure count": strings.Replace(
+			base, `, "total-failure-session-count": 4`, ``, 1,
+		),
+		"missing failed session count": strings.Replace(
+			base, `"failed-session-count": 4`, `"unknown": 4`, 1,
+		),
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {
 			got, err := Parse([]byte(input))
 			if err == nil || got != nil {
 				t.Fatalf("Parse = (%v, %v), want an error and no report", got, err)
+			}
+		})
+	}
+}
+
+func TestTLSDateRangeBounds(t *testing.T) {
+	base := string(fixture(t, "google.json"))
+
+	reject := map[string]string{
+		"start before 1990": strings.Replace(
+			base, "2024-01-01T00:00:00Z", "1989-12-31T23:59:59Z", 1,
+		),
+		"end at 2200": strings.Replace(
+			base, "2024-01-01T23:59:59Z", "2200-01-01T00:00:00Z", 1,
+		),
+		"start at 2200": strings.Replace(
+			strings.Replace(base, "2024-01-01T00:00:00Z", "2200-01-01T00:00:00Z", 1),
+			"2024-01-01T23:59:59Z", "2200-01-02T00:00:00Z", 1,
+		),
+	}
+	for name, input := range reject {
+		t.Run(name, func(t *testing.T) {
+			got, err := Parse([]byte(input))
+			if !errors.Is(err, errDateRange) || got != nil {
+				t.Fatalf("Parse = (%v, %v), want date range error", got, err)
+			}
+		})
+	}
+
+	accept := map[string]string{
+		"start at 1990": strings.Replace(
+			base, "2024-01-01T00:00:00Z", "1990-01-01T00:00:00Z", 1,
+		),
+		"end before 2200": strings.Replace(
+			base, "2024-01-01T23:59:59Z", "2199-12-31T23:59:59Z", 1,
+		),
+	}
+	for name, input := range accept {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(input))
+			if err != nil {
+				t.Fatalf("Parse error = %v, want nil", err)
 			}
 		})
 	}

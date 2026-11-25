@@ -84,6 +84,8 @@ export const api = {
     request<T.ReportDetail>(
       `/api/reports/${encodeURIComponent(String(id))}${qs({ tz })}`,
     ),
+  reporters: (f: RangeFilters) =>
+    request<T.ReportersResponse>(`/api/reporters${rangeQs(f)}`),
   tls: (f: RangeFilters) => request<T.TLSResponse>(`/api/tls${rangeQs(f)}`),
   tlsDomain: (domain: string, f: RangeFilters) =>
     request<T.TLSDomainDetail>(

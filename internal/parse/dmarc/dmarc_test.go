@@ -156,9 +156,9 @@ func TestAggregateGoogleRecords(t *testing.T) {
 			SourceIP:     "192.0.2.11",
 			Count:        1,
 			HeaderFrom:   "example.com",
-			Disposition:  "",
-			DKIM:         "",
-			SPF:          "",
+			Disposition:  "none",
+			DKIM:         "fail",
+			SPF:          "fail",
 			EnvelopeFrom: "",
 			EnvelopeTo:   "",
 			Reasons:      nil,
@@ -298,12 +298,53 @@ func TestAggregateRejectsInvalidDocuments(t *testing.T) {
 		"scoped IPv6":      strings.Replace(base, "203.0.113.40", "2001:db8::20%zone", 1),
 		"negative count":   strings.Replace(base, "1099511627776", "-1", 1),
 		"overflowed count": strings.Replace(base, "1099511627776", "1099511627777", 1),
+		"missing row":      strings.NewReplacer("<row>", "", "</row>", "").Replace(base),
+		"missing policy_evaluated": strings.NewReplacer(
+			"<policy_evaluated>", "", "</policy_evaluated>", "",
+		).Replace(base),
+		"missing evaluated dkim": strings.Replace(base, "<dkim> PASS </dkim>", "", 1),
+		"missing evaluated spf":  strings.Replace(base, "<spf> FAIL </spf>", "", 1),
+		"missing count":          strings.Replace(base, "<count> 1099511627776 </count>", "", 1),
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {
 			got, err := ParseAggregate([]byte(input))
 			if err == nil || got != nil {
 				t.Fatalf("ParseAggregate = (%v, %v), want an error and no report", got, err)
+			}
+		})
+	}
+}
+
+func TestAggregateDateRangeBounds(t *testing.T) {
+	base := string(fixture(t, "dmarc", "quirks.xml"))
+
+	reject := map[string]string{
+		"begin before 1990": strings.Replace(base, "1704067200", "631151999", 1),
+		"end at 2200":       strings.Replace(base, "1704153599", "7258118400", 1),
+		"begin at 2200": strings.Replace(
+			strings.Replace(base, "1704067200", "7258118400", 1),
+			"1704153599", "7258118400", 1,
+		),
+	}
+	for name, input := range reject {
+		t.Run(name, func(t *testing.T) {
+			got, err := ParseAggregate([]byte(input))
+			if !errors.Is(err, errDateRange) || got != nil {
+				t.Fatalf("ParseAggregate = (%v, %v), want date range error", got, err)
+			}
+		})
+	}
+
+	accept := map[string]string{
+		"begin at 1990":   strings.Replace(base, "1704067200", "631152000", 1),
+		"end before 2200": strings.Replace(base, "1704153599", "7258118399", 1),
+	}
+	for name, input := range accept {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseAggregate([]byte(input))
+			if err != nil {
+				t.Fatalf("ParseAggregate error = %v, want nil", err)
 			}
 		})
 	}

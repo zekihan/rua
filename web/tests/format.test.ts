@@ -7,6 +7,10 @@ import {
   formatDateLabel,
   formatUnixDate,
   formatUnixDateTime,
+  formatUnixWindow,
+  formatPending,
+  sourceKindLabel,
+  plural,
 } from "../src/format.ts";
 test("numbers and percents", () => {
   assert.equal(formatNumber(1234567), "1,234,567");
@@ -41,4 +45,40 @@ test("zero differs from a missing rate, and invalid byte counts are hidden", () 
   assert.equal(formatPercent(Number.NaN), "—");
   assert.equal(formatBytes(-1), "—");
   assert.equal(formatBytes(1024 ** 3), "1.0 GiB");
+});
+
+test("pending backlog shows a dash when unknown", () => {
+  assert.equal(formatPending(null), "—");
+  assert.equal(formatPending(0), "0");
+  assert.equal(formatPending(1500), "1,500");
+});
+
+test("report windows are compact and follow the selected tz", () => {
+  const begin = Date.UTC(2026, 10, 24, 15, 26) / 1000;
+  const end = Date.UTC(2026, 10, 24, 20, 26) / 1000;
+  assert.equal(formatUnixWindow(begin, end, "UTC"), "24 Nov 15:26 – 20:26");
+  assert.equal(
+    formatUnixWindow(begin, end + 8 * 3600, "UTC"),
+    "24 Nov 15:26 – 25 Nov 04:26",
+  );
+  assert.equal(
+    formatUnixWindow(begin, end, "Europe/Istanbul"),
+    "24 Nov 18:26 – 23:26",
+  );
+  assert.equal(formatUnixWindow(null, end, "UTC"), "—");
+});
+
+test("timestamps outside the Date range render a placeholder", () => {
+  const huge = 9e15;
+  assert.equal(formatUnixDate(huge, "UTC"), "—");
+  assert.equal(formatUnixDateTime(-huge, "UTC"), "—");
+  assert.equal(formatUnixWindow(1, huge, "UTC"), "—");
+});
+
+test("source kinds and plurals read as words", () => {
+  assert.equal(sourceKindLabel("as"), "ASN");
+  assert.equal(sourceKindLabel("ptr"), "PTR domain");
+  assert.equal(sourceKindLabel("custom"), "custom");
+  assert.equal(plural(1, "message", "messages"), "message");
+  assert.equal(plural(2, "message", "messages"), "messages");
 });

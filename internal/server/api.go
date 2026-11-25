@@ -35,6 +35,9 @@ func handleQueryError(writer http.ResponseWriter, request *http.Request, err err
 		writeError(writer, http.StatusBadRequest, "bad_request", err.Error())
 	case errors.Is(err, query.ErrNotFound):
 		writeError(writer, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, query.ErrUnavailable):
+		writer.Header().Set("Retry-After", "60")
+		writeError(writer, http.StatusServiceUnavailable, "unavailable", err.Error())
 	default:
 		slog.ErrorContext(request.Context(), "API request failed", slog.Any("error", err))
 		writeError(
@@ -114,6 +117,22 @@ func (srv *Server) handleOverview(writer http.ResponseWriter, request *http.Requ
 	}
 
 	value, err := srv.opts.Query.Overview(request.Context(), filter)
+	if err != nil {
+		handleQueryError(writer, request, err)
+
+		return
+	}
+
+	writeJSON(writer, http.StatusOK, value)
+}
+
+func (srv *Server) handleReporters(writer http.ResponseWriter, request *http.Request) {
+	filter, ok := srv.parseFilter(writer, request)
+	if !ok {
+		return
+	}
+
+	value, err := srv.opts.Query.Reporters(request.Context(), filter)
 	if err != nil {
 		handleQueryError(writer, request, err)
 

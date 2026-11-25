@@ -3,8 +3,10 @@ import type { DayVerdicts, PolicyChange, TLSDay } from "../api/types.ts";
 import {
   barHeight,
   countScale,
+  dayLabel,
   maxValue,
   tickIndices,
+  visibleBarHeight,
 } from "../chart-helpers.ts";
 import { formatNumber } from "../format.ts";
 import {
@@ -13,7 +15,7 @@ import {
   verdictSeries,
   type Verdict,
 } from "./Verdict.tsx";
-import { Empty } from "./ui.tsx";
+import { Empty, TableScroll } from "./ui.tsx";
 
 type Series = ReadonlyArray<{ key: Verdict; label: string }>;
 type ChartDay = { date: string; counts: Record<Verdict, number> };
@@ -45,27 +47,110 @@ export function policySummary(change: PolicyChange) {
   );
 }
 
+function DailyTable({
+  days,
+  series,
+  label,
+}: {
+  days: ChartDay[];
+  series: Series;
+  label: string;
+}) {
+  return (
+    <details data-testid="chart-table-toggle">
+      <summary className="w-fit text-xs font-medium text-accent">
+        Show as table
+      </summary>
+      <div className="mt-2">
+        <TableScroll label={`${label} as a table`} scrollClassName="max-h-72">
+          <table data-testid="chart-table">
+            <caption className="sr-only">{label}</caption>
+            <thead className="sticky top-0">
+              <tr>
+                <th scope="col">Date</th>
+                {series.map(({ key, label: name }) => (
+                  <th key={key} scope="col" className="num">
+                    {name}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {days.map(({ date, counts }) => (
+                <tr key={date}>
+                  <th scope="row" className="tabular-nums">
+                    {date}
+                  </th>
+                  {series.map(({ key }) => (
+                    <td key={key} className="num">
+                      {formatNumber(counts[key])}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </TableScroll>
+      </div>
+    </details>
+  );
+}
+
 function DailyChart({
   days,
   series,
   changes = [],
   label,
+  compact = false,
+  emptyText = "No activity in this range.",
 }: {
   days: ChartDay[];
   series: Series;
   changes?: PolicyChange[];
   label: string;
+  compact?: boolean;
+  emptyText?: string;
 }) {
   const { ref, width } = useChartWidth();
   const id = useId();
   const [activeDate, setActiveDate] = useState<string>();
+  const [activeDay, setActiveDay] = useState<string>();
+  const svgRef = useRef<SVGSVGElement>(null);
+  const hintId = `${id}-hint`;
+  const moveActive = (key: string) => {
+    if (days.length === 0) return false;
+    const current = days.findIndex((day) => day.date === activeDay);
+    let next: number;
+    if (key === "ArrowLeft") next = current < 0 ? days.length - 1 : current - 1;
+    else if (key === "ArrowRight") next = current < 0 ? 0 : current + 1;
+    else if (key === "Home") next = 0;
+    else if (key === "End") next = days.length - 1;
+    else return false;
+    setActiveDate(undefined);
+    setActiveDay(days[Math.max(0, Math.min(days.length - 1, next))].date);
+    return true;
+  };
+  useEffect(() => {
+    if (!activeDay) return;
+    const close = (event: PointerEvent) => {
+      if (
+        !(event.target instanceof Element) ||
+        !event.target.closest("[data-day]")
+      )
+        setActiveDay(undefined);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [activeDay]);
+  const activeCounts = days.find((day) => day.date === activeDay);
   const changesByDate = new Map<string, PolicyChange[]>();
   for (const change of changes) {
     const existing = changesByDate.get(change.date);
     if (existing) existing.push(change);
     else changesByDate.set(change.date, [change]);
   }
-  const active = activeDate ? (changesByDate.get(activeDate) ?? []) : [];
+  const policyDate = activeDate ?? activeDay;
+  const active = policyDate ? (changesByDate.get(policyDate) ?? []) : [];
   const max = maxValue(
     days.map(({ counts }) =>
       series.reduce((sum, { key }) => sum + counts[key], 0),
@@ -73,7 +158,7 @@ function DailyChart({
   );
   const ticks = countScale(max);
   const limit = ticks.at(-1)!;
-  const height = width < 500 ? 185 : 255;
+  const height = compact ? 140 : width < 500 ? 185 : 255;
   const top = 17;
   const bottom = height - 26;
   const left = Math.max(30, formatNumber(limit).length * 7 + 8);
@@ -109,14 +194,38 @@ function DailyChart({
       </div>
       <div ref={ref} className="relative min-w-0">
         {max === 0 && changes.length === 0 ? (
-          <Empty>No activity in this range.</Empty>
+          <Empty>{emptyText}</Empty>
         ) : (
           <>
             <svg
+              ref={svgRef}
               viewBox={`0 0 ${width} ${height}`}
               className="block w-full overflow-visible"
               role="group"
-              aria-label={label}
+              tabIndex={0}
+              aria-label={`${label}, ${days.length} ${days.length === 1 ? "day" : "days"}${days.length > 0 ? ` from ${days[0].date} to ${days[days.length - 1].date}` : ""}`}
+              aria-describedby={hintId}
+              data-testid="daily-chart-group"
+              onFocus={(event) => {
+                if (
+                  event.target === event.currentTarget &&
+                  event.currentTarget.matches(":focus-visible")
+                )
+                  setActiveDay((current) => current ?? days.at(-1)?.date);
+              }}
+              onBlur={(event) => {
+                if (
+                  !(event.relatedTarget instanceof Node) ||
+                  !event.currentTarget.contains(event.relatedTarget)
+                )
+                  setActiveDay(undefined);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  setActiveDay(undefined);
+                  setActiveDate(undefined);
+                } else if (moveActive(event.key)) event.preventDefault();
+              }}
             >
               {ticks.map((tick) => {
                 const y = bottom - barHeight(tick, limit, bottom - top);
@@ -144,19 +253,42 @@ function DailyChart({
               {days.map(({ date, counts }, index) => {
                 let y = bottom;
                 const x = midX(index) - barWidth / 2;
+                const selected = activeDay === date;
                 return (
-                  <g key={date}>
-                    <title>
-                      {date} ·{" "}
-                      {series
-                        .map(
-                          ({ key, label: name }) =>
-                            `${name} ${formatNumber(counts[key])}`,
-                        )
-                        .join(" · ")}
-                    </title>
+                  <g
+                    key={date}
+                    tabIndex={-1}
+                    role="img"
+                    aria-label={dayLabel(date, series, counts, formatNumber)}
+                    data-testid="chart-day"
+                    data-day={date}
+                    className="outline-none"
+                    onPointerEnter={(event) => {
+                      if (event.pointerType !== "touch") setActiveDay(date);
+                    }}
+                    onPointerLeave={(event) => {
+                      if (
+                        event.pointerType !== "touch" &&
+                        !svgRef.current?.contains(document.activeElement)
+                      )
+                        setActiveDay(undefined);
+                    }}
+                    onClick={() => setActiveDay(date)}
+                  >
+                    <rect
+                      x={midX(index) - slot / 2}
+                      y={top}
+                      width={slot}
+                      height={bottom - top}
+                      fill={selected ? "var(--accent)" : "transparent"}
+                      fillOpacity={selected ? 0.12 : 1}
+                    />
                     {series.map(({ key }) => {
-                      const size = barHeight(counts[key], limit, bottom - top);
+                      const size = visibleBarHeight(
+                        counts[key],
+                        limit,
+                        bottom - top,
+                      );
                       y -= size;
                       return (
                         size > 0 && (
@@ -198,7 +330,7 @@ function DailyChart({
                 return (
                   <g
                     key={date}
-                    tabIndex={0}
+                    tabIndex={-1}
                     role="img"
                     aria-label={`Policy changes on ${date}: ${dated.map((change) => `${change.domain}, ${policySummary(change)}`).join("; ")}`}
                     data-testid="policy-marker"
@@ -240,22 +372,54 @@ function DailyChart({
                 );
               })}
             </svg>
-            {active.length > 0 && (
+            <p id={hintId} className="sr-only">
+              Focus the chart, then use the left and right arrow keys to move
+              between days, and Home or End to jump to the first or last day.
+            </p>
+            <p className="sr-only" aria-live="polite" data-testid="chart-live">
+              {activeCounts &&
+                `${dayLabel(activeCounts.date, series, activeCounts.counts, formatNumber)}${active.map((change) => `. Policy change for ${change.domain}: ${policySummary(change)}`).join("")}`}
+            </p>
+            {(active.length > 0 || activeCounts) && (
               <div
                 role="tooltip"
+                data-testid="chart-tooltip"
                 className="pointer-events-none absolute top-6 right-2 z-10 max-w-[90%] space-y-1 rounded-lg border border-line bg-surface px-3 py-2 text-xs shadow-lg"
               >
-                <p className="font-semibold">{activeDate}</p>
-                {active.map((change) => (
-                  <p key={change.reportId}>
-                    <strong>{change.domain}</strong> · {policySummary(change)}
-                  </p>
-                ))}
+                {activeCounts && (
+                  <>
+                    <p className="font-semibold">{activeCounts.date}</p>
+                    <p className="tabular-nums">
+                      {series
+                        .map(
+                          ({ key, label: name }) =>
+                            `${name} ${formatNumber(activeCounts.counts[key])}`,
+                        )
+                        .join(" · ")}
+                    </p>
+                  </>
+                )}
+                {active.length > 0 && (
+                  <>
+                    {!activeCounts && (
+                      <p className="font-semibold">{policyDate}</p>
+                    )}
+                    {active.map((change) => (
+                      <p key={change.reportId}>
+                        <strong>{change.domain}</strong> ·{" "}
+                        {policySummary(change)}
+                      </p>
+                    ))}
+                  </>
+                )}
               </div>
             )}
           </>
         )}
       </div>
+      {days.length > 0 && (
+        <DailyTable days={days} series={series} label={label} />
+      )}
       <svg className="absolute h-0 w-0" aria-hidden="true">
         <VerdictPatterns id={id} />
       </svg>
@@ -285,6 +449,8 @@ const tlsSeries = [
   { key: "fail", label: "Failed" },
 ] as const;
 
+const failedSeries = [{ key: "fail", label: "Failed" }] as const;
+
 export function TLSBars({ days }: { days: TLSDay[] }) {
   return (
     <DailyChart
@@ -294,6 +460,21 @@ export function TLSBars({ days }: { days: TLSDay[] }) {
       }))}
       series={tlsSeries}
       label="Daily TLS sessions by outcome"
+    />
+  );
+}
+
+export function TLSFailureBars({ days }: { days: TLSDay[] }) {
+  return (
+    <DailyChart
+      days={days.map(({ date, failure }) => ({
+        date,
+        counts: { pass: 0, forwarded: 0, fail: failure },
+      }))}
+      series={failedSeries}
+      label="Daily failed TLS sessions"
+      compact
+      emptyText="No failed sessions in this range."
     />
   );
 }

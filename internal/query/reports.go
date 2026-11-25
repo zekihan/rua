@@ -12,6 +12,7 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
+	"github.com/zekihan/rua/internal/report"
 	"github.com/zekihan/rua/internal/store"
 )
 
@@ -109,12 +110,7 @@ func (svc *Service) reportStats(
 		return 0, nil, 0, nil
 	}
 
-	recordIDs := make([]int64, 0, len(rows))
-	for index := range rows {
-		recordIDs = append(recordIDs, rows[index].RecordID)
-	}
-
-	authByRecord, err := svc.authForRecords(ctx, tx, recordIDs)
+	authByRecord, err := svc.authForReport(ctx, tx, row.ID)
 	if err != nil {
 		return 0, nil, 0, err
 	}
@@ -139,26 +135,25 @@ func (svc *Service) reportStats(
 	return messages, rate(pass, messages), 0, nil
 }
 
-func (svc *Service) authForRecords(
-	ctx context.Context, tx *sqlx.Tx, recordIDs []int64,
+// authForReport loads auth results for every record of one report. The
+// report-scoped subquery binds a single parameter however many records
+// the report has, unlike an IN list over record ids.
+func (svc *Service) authForReport(
+	ctx context.Context, tx *sqlx.Tx, reportID int64,
 ) (map[int64][]AuthResult, error) {
 	result := make(map[int64][]AuthResult)
 
-	if len(recordIDs) == 0 {
-		return result, nil
-	}
-
-	query, args, err := sqlx.In(`SELECT record AS record_id, method, domain, selector, scope, result
-		FROM auth_results WHERE record IN (?) ORDER BY record, method, domain`, recordIDs)
-	if err != nil {
-		return nil, fmt.Errorf("build auth query: %w", err)
-	}
-
-	query = tx.Rebind(query)
-
 	var rows []authDBRow
 
-	err = tx.SelectContext(ctx, &rows, query, args...)
+	err := tx.SelectContext(
+		ctx,
+		&rows,
+		`SELECT record AS record_id, method, domain, selector, scope, result
+		FROM auth_results
+		WHERE record IN (SELECT id FROM records WHERE report = ?)
+		ORDER BY record, method, domain`,
+		reportID,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("load auth results: %w", err)
 	}
@@ -310,60 +305,91 @@ func (svc *Service) listReportRows(
 	ctx context.Context, tx *sqlx.Tx, rng *resolvedRange, filter *Filter,
 	allowed map[int64]bool, hasCursor bool, cursorBegin, cursorID int64, limit int,
 ) ([]reportDBRow, error) {
-	query := `SELECT id, kind, message, blob, org, email, extra_contact, report_id,
+	baseQuery := `SELECT id, kind, message, blob, org, email, extra_contact, report_id,
 		begin, end, domain, schema, duplicate_of, conflict
 		FROM reports
 		WHERE ((begin + end) / 2) >= ? AND ((begin + end) / 2) < ?`
-	args := []any{rng.fromUnix, rng.toUnix}
+	baseArgs := []any{rng.fromUnix, rng.toUnix}
 
 	if filter.Domain != "" {
-		query += domainClause
+		baseQuery += domainClause
 
-		args = append(args, filter.Domain)
+		baseArgs = append(baseArgs, filter.Domain)
 	}
 
 	if filter.Reporter != "" {
-		query += ` AND org = ?`
+		baseQuery += ` AND org = ?`
 
-		args = append(args, filter.Reporter)
+		baseArgs = append(baseArgs, filter.Reporter)
 	}
 
 	if filter.Kind != "" {
-		query += ` AND kind = ?`
+		baseQuery += ` AND kind = ?`
 
-		args = append(args, filter.Kind)
+		baseArgs = append(baseArgs, filter.Kind)
 	}
 
-	if hasCursor {
-		query += ` AND (begin < ? OR (begin = ? AND id < ?))`
+	page := func(
+		withCursor bool, begin, id int64, count int,
+	) ([]reportDBRow, error) {
+		query := baseQuery
 
-		args = append(args, cursorBegin, cursorBegin, cursorID)
+		args := append([]any{}, baseArgs...)
+
+		if withCursor {
+			query += ` AND (begin < ? OR (begin = ? AND id < ?))`
+
+			args = append(args, begin, begin, id)
+		}
+
+		query += ` ORDER BY begin DESC, id DESC LIMIT ?`
+
+		args = append(args, count)
+
+		var rows []reportDBRow
+
+		err := tx.SelectContext(ctx, &rows, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("list reports: %w", err)
+		}
+
+		return rows, nil
 	}
 
-	query += ` ORDER BY begin DESC, id DESC`
-
-	var rows []reportDBRow
-
-	err := tx.SelectContext(ctx, &rows, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list reports: %w", err)
+	if filter.Source == "" {
+		return page(hasCursor, cursorBegin, cursorID, limit+1)
 	}
 
-	if filter.Source != "" {
-		filtered := make([]reportDBRow, 0, len(rows))
+	// Source-filtered: walk keyset pages in SQL until limit+1 matches
+	// are collected, instead of loading every report in the range.
+	collected := make([]reportDBRow, 0, limit+1)
+	withCursor, begin, id := hasCursor, cursorBegin, cursorID
 
-		for index := range rows {
-			if allowed[rows[index].ID] {
-				filtered = append(filtered, rows[index])
+	for {
+		batch, err := page(withCursor, begin, id, limit+1)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(batch) == 0 {
+			break
+		}
+
+		for index := range batch {
+			if allowed[batch[index].ID] {
+				collected = append(collected, batch[index])
 			}
 		}
 
-		rows = filtered
+		if len(collected) > limit || len(batch) < limit+1 {
+			break
+		}
+
+		last := batch[len(batch)-1]
+		withCursor, begin, id = true, last.Begin, last.ID
 	}
 
-	_ = limit
-
-	return rows, nil
+	return collected, nil
 }
 
 func (svc *Service) fillReports(
@@ -595,13 +621,7 @@ func (svc *Service) loadRecordsForReport(
 		return nil, fmt.Errorf("load report records: %w", err)
 	}
 
-	recordIDs := make([]int64, 0, len(rows))
-
-	for index := range rows {
-		recordIDs = append(recordIDs, rows[index].RecordID)
-	}
-
-	authByRecord, err := svc.authForRecords(ctx, tx, recordIDs)
+	authByRecord, err := svc.authForReport(ctx, tx, reportID)
 	if err != nil {
 		return nil, err
 	}
@@ -806,13 +826,19 @@ func (svc *Service) ReportRaw(ctx context.Context, id int64) ([]byte, string, er
 }
 
 // MessageRaw returns the original message bytes and a file name.
+// A failure-containing message has no stored raw blob; its download
+// is rendered on the fly from its stored documents instead.
 func (svc *Service) MessageRaw(ctx context.Context, id int64) ([]byte, string, error) {
 	var data []byte
 
 	err := svc.deps.Store.Read(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
-		var blob []byte
+		var row struct {
+			Blob          []byte `db:"blob"`
+			ParserVersion int    `db:"parser_version"`
+		}
 
-		err := tx.GetContext(ctx, &blob, `SELECT blob FROM messages WHERE id = ?`, id)
+		err := tx.GetContext(ctx, &row,
+			`SELECT blob, parser_version FROM messages WHERE id = ?`, id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("%w: message %d", ErrNotFound, id)
 		}
@@ -821,20 +847,38 @@ func (svc *Service) MessageRaw(ctx context.Context, id int64) ([]byte, string, e
 			return fmt.Errorf("load message: %w", err)
 		}
 
-		if len(blob) == 0 {
+		blob := row.Blob
+		if len(blob) > 0 && row.ParserVersion < report.ParserVersion {
+			// An older parser may have stored a raw failure report, which
+			// the pending upgrade replaces with headers-only documents.
+			return fmt.Errorf("%w: message %d awaits reprocessing", ErrUnavailable, id)
+		}
+
+		if len(blob) > 0 {
+			raw, blobErr := store.GetBlob(ctx, tx, blob)
+			if errors.Is(blobErr, store.ErrNotFound) {
+				return fmt.Errorf("%w: message blob", ErrNotFound)
+			}
+
+			if blobErr != nil {
+				return fmt.Errorf("read message blob: %w", blobErr)
+			}
+
+			data = raw
+
+			return nil
+		}
+
+		docs, docErr := loadRenderDocs(ctx, tx, id)
+		if docErr != nil {
+			return docErr
+		}
+
+		if len(docs) == 0 {
 			return fmt.Errorf("%w: message blob", ErrNotFound)
 		}
 
-		raw, err := store.GetBlob(ctx, tx, blob)
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%w: message blob", ErrNotFound)
-		}
-
-		if err != nil {
-			return fmt.Errorf("read message blob: %w", err)
-		}
-
-		data = raw
+		data = renderDocuments(docs)
 
 		return nil
 	})
@@ -843,4 +887,39 @@ func (svc *Service) MessageRaw(ctx context.Context, id int64) ([]byte, string, e
 	}
 
 	return data, "message-" + strconv.FormatInt(id, 10) + ".eml", nil
+}
+
+func loadRenderDocs(
+	ctx context.Context, tx *sqlx.Tx, messageID int64,
+) ([]renderDoc, error) {
+	var rows []struct {
+		Kind string `db:"kind"`
+		Blob []byte `db:"blob"`
+	}
+
+	err := tx.SelectContext(ctx, &rows, `SELECT kind, blob FROM documents
+		WHERE message = ? ORDER BY seq`, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("load message documents: %w", err)
+	}
+
+	docs := make([]renderDoc, 0, len(rows))
+
+	for index := range rows {
+		doc := renderDoc{kind: rows[index].Kind, data: nil}
+		if len(rows[index].Blob) > 0 {
+			doc.data, err = store.GetBlob(ctx, tx, rows[index].Blob)
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, fmt.Errorf("%w: message document blob", ErrNotFound)
+			}
+
+			if err != nil {
+				return nil, fmt.Errorf("read message document blob: %w", err)
+			}
+		}
+
+		docs = append(docs, doc)
+	}
+
+	return docs, nil
 }

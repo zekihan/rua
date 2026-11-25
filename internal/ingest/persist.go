@@ -34,12 +34,102 @@ const (
 )
 
 type messageWrite struct {
-	messageError    string
-	result          Result
-	aggregateRows   int
-	tlsRows         int
-	failuresWritten int
-	recordsAdded    bool
+	preserved         map[reportIdentity][]int64
+	messageError      string
+	result            Result
+	aggregateRows     int
+	tlsRows           int
+	failuresWritten   int
+	recordsAdded      bool
+	failureContaining bool
+}
+
+// reportIdentity identifies a report row across a reparse (DESIGN.md
+// section 5 report identity, scoped to its message).
+type reportIdentity struct {
+	kind     string
+	org      string
+	reportID string
+	domain   string
+	message  int64
+}
+
+const reportIDSeqKey = "report_id_seq"
+
+// ensureReportIDSeq initializes the monotonic report id sequence from the
+// largest id in use, so ids of deleted reports are never reused.
+func ensureReportIDSeq(ctx context.Context, tx *sqlx.Tx) (int64, error) {
+	var maxID sql.NullInt64
+
+	err := tx.GetContext(ctx, &maxID, `SELECT max(id) FROM reports`)
+	if err != nil {
+		return 0, fmt.Errorf("read largest report id: %w", err)
+	}
+
+	stored, ok, err := store.Meta(ctx, tx, reportIDSeqKey)
+	if err != nil {
+		return 0, fmt.Errorf("read report id sequence: %w", err)
+	}
+
+	var seq int64
+
+	if ok {
+		seq, err = strconv.ParseInt(stored, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse %s: %w", reportIDSeqKey, err)
+		}
+	}
+
+	changed := !ok
+
+	if maxID.Int64 > seq {
+		seq = maxID.Int64
+		changed = true
+	}
+
+	if changed {
+		err = store.SetMeta(ctx, tx, reportIDSeqKey, strconv.FormatInt(seq, 10))
+		if err != nil {
+			return 0, fmt.Errorf("write report id sequence: %w", err)
+		}
+	}
+
+	return seq, nil
+}
+
+func allocateReportID(ctx context.Context, tx *sqlx.Tx) (int64, error) {
+	seq, err := ensureReportIDSeq(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+
+	seq++
+
+	err = store.SetMeta(ctx, tx, reportIDSeqKey, strconv.FormatInt(seq, 10))
+	if err != nil {
+		return 0, fmt.Errorf("write report id sequence: %w", err)
+	}
+
+	return seq, nil
+}
+
+func (state *messageWrite) preservedID(row *reportRow) int64 {
+	key := reportIdentity{
+		message:  state.result.MessageID,
+		kind:     string(row.kind),
+		org:      row.org,
+		reportID: row.reportID,
+		domain:   row.domain,
+	}
+
+	queue := state.preserved[key]
+	if len(queue) == 0 {
+		return 0
+	}
+
+	state.preserved[key] = queue[1:]
+
+	return queue[0]
 }
 
 // Ingest stores an RFC 5322 message or a bare document. Parse failures are
@@ -59,16 +149,34 @@ func (pipe *Pipeline) Ingest(ctx context.Context, raw []byte, src Source) (Resul
 			entity, headerErr = message.Read(bytes.NewReader(raw))
 		}
 
-		if len(raw) <= MaxMessageBytes {
-			var err error
+		collection, err := extractMessage(raw, entity, headerErr)
+		if err != nil {
+			return nil, nil, err
+		}
 
+		state.failureContaining = collection.failureContaining
+
+		err = state.applyDocuments(ctx, tx, collection.docs)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		switch {
+		case collection.failureContaining:
+			err = writeDocuments(ctx, tx, state.result.MessageID, collection.docs)
+			if err != nil {
+				return nil, nil, err
+			}
+		case len(raw) <= MaxMessageBytes:
 			blob, err = store.PutBlob(ctx, tx, raw)
 			if err != nil {
 				return nil, nil, fmt.Errorf("save raw message: %w", err)
 			}
+		default:
+			// Oversized messages keep no stored form.
 		}
 
-		return blob, entity, parseMessage(ctx, tx, state, raw, entity, headerErr)
+		return blob, entity, nil
 	})
 }
 
@@ -196,89 +304,43 @@ func (pipe *Pipeline) notify(added bool) {
 	}
 }
 
-func (state *messageWrite) parse(ctx context.Context, tx *sqlx.Tx, raw []byte) error {
-	var (
-		entity    *message.Entity
-		headerErr error
-	)
-	if !looksBare(raw) {
-		entity, headerErr = message.Read(bytes.NewReader(raw))
-	}
-
-	return parseMessage(ctx, tx, state, raw, entity, headerErr)
-}
-
-func parseMessage(
-	ctx context.Context, tx *sqlx.Tx, state *messageWrite, raw []byte,
-	entity *message.Entity, headerErr error,
+// applyDocuments evaluates extraction output and writes the derived
+// rows. It is the one path fresh ingest and replay share.
+func (state *messageWrite) applyDocuments(
+	ctx context.Context, tx *sqlx.Tx, docs []storedDoc,
 ) error {
-	ext := newExtraction(nil)
-	ext.accept = func(doc document) error {
-		return state.storeDocument(ctx, tx, ext, doc)
-	}
+	outcome := evaluateDocuments(docs)
 
-	err := ext.extract(raw, entity, headerErr)
-	if err != nil {
-		return err
-	}
+	state.result.Class = outcome.class
+	state.result.Status = outcome.status
+	state.messageError = outcome.errText
 
-	state.result.Class = ext.class
-	state.result.Reports = state.aggregateRows + state.tlsRows
-
-	state.result.Status = StatusOK
-	if ext.firstError != nil {
-		state.result.Status = StatusError
-		if state.result.Reports+state.failuresWritten > 0 {
-			state.result.Status = StatusPartial
+	for index := range outcome.items {
+		err := state.storeItem(ctx, tx, &outcome.items[index])
+		if err != nil {
+			return err
 		}
-
-		state.messageError = boundedText(ext.firstError.Error(), report.MaxLong)
 	}
+
+	state.result.Reports = state.aggregateRows + state.tlsRows
 
 	return nil
 }
 
-func (state *messageWrite) storeDocument(
-	ctx context.Context, tx *sqlx.Tx, ext *extraction, doc document,
+func (state *messageWrite) storeItem(
+	ctx context.Context, tx *sqlx.Tx, item *evalItem,
 ) error {
-	switch doc.class {
+	switch item.class {
 	case report.ClassAggregate:
-		value, err := parseAggregate(doc.data)
-		if err != nil {
-			ext.failed(fmt.Errorf("parse DMARC aggregate: %w", err))
-
-			return nil
-		}
-
-		return state.storeAggregate(ctx, tx, doc.data, value)
+		return state.storeAggregate(ctx, tx, item.data, item.aggregate)
 	case report.ClassTLS:
-		value, err := parseTLS(doc.data)
-		if err != nil {
-			ext.failed(fmt.Errorf("parse TLS report: %w", err))
-
-			return nil
-		}
-
-		if len(value.Policies) == 0 {
-			ext.failed(errNoTLSPolicies)
-
-			return nil
-		}
-
-		return state.storeTLS(ctx, tx, doc.data, value)
+		return state.storeTLS(ctx, tx, item.data, item.tlsReport)
 	case report.ClassFailure:
-		value, err := parseFailure(doc.data, doc.originalHeaders)
-		if err != nil {
-			ext.failed(fmt.Errorf("parse DMARC failure: %w", err))
-
-			return nil
-		}
-
-		return state.storeFailure(ctx, tx, value)
+		return state.storeFailure(ctx, tx, item.failure)
 	case report.ClassOther:
 		return nil
 	default:
-		return fmt.Errorf("%w: %s", errUnexpectedKind, doc.class)
+		return fmt.Errorf("%w: %s", errUnexpectedKind, item.class)
 	}
 }
 
@@ -336,13 +398,19 @@ func (state *messageWrite) insertReport(
 		}
 	}
 
-	var id int64
+	id := state.preservedID(row)
+	if id == 0 {
+		id, err = allocateReportID(ctx, tx)
+		if err != nil {
+			return 0, false, err
+		}
+	}
 
 	err = tx.GetContext(ctx, &id, `INSERT INTO reports
-		(kind, message, blob, org, email, extra_contact, report_id, begin, end, domain, schema,
+		(id, kind, message, blob, org, email, extra_contact, report_id, begin, end, domain, schema,
 		 duplicate_of, conflict)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-		row.kind, state.result.MessageID, row.blob, row.org, row.email, row.extraContact,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		id, row.kind, state.result.MessageID, row.blob, row.org, row.email, row.extraContact,
 		row.reportID, row.begin, row.end, row.domain, row.schema, duplicateOf, conflict)
 	if err != nil {
 		return 0, false, fmt.Errorf("insert report: %w", err)

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/jmoiron/sqlx"
 
 	"github.com/zekihan/rua/internal/imapsrc"
 	"github.com/zekihan/rua/internal/ingest"
@@ -263,6 +266,20 @@ func TestServerRawAndErrors(t *testing.T) {
 	eq(t, msgRaw.Code, http.StatusOK)
 	eq(t, strings.Contains(msgRaw.Header().Get("Content-Disposition"), "message-1.eml"), true)
 
+	err := env.st.Write(t.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		_, execErr := tx.ExecContext(ctx, `UPDATE messages SET parser_version = 1 WHERE id = 1`)
+
+		return execErr //nolint:wrapcheck // Test helper.
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pending := env.do(t, http.MethodGet, "/api/messages/1/raw", nil)
+	eq(t, pending.Code, http.StatusServiceUnavailable)
+	eq(t, pending.Header().Get("Retry-After"), "60")
+	eq(t, decodeJSON[query.ErrorBody](t, pending).Error.Code, "unavailable")
+
 	eq(t, env.do(t, http.MethodGet, "/api/reports/99999?tz=UTC", nil).Code, http.StatusNotFound)
 	eq(
 		t,
@@ -280,6 +297,41 @@ func TestServerRawAndErrors(t *testing.T) {
 	eq(t, health.Code, http.StatusOK)
 	eq(t, health.Body.String(), "ok")
 	checkHeaders(t, health)
+}
+
+func TestReportersRoute(t *testing.T) {
+	t.Parallel()
+
+	env := newEnv(t, fetcherWith(imapsrc.ErrDisabled))
+
+	rec := env.do(t, http.MethodGet, "/api/reporters?from=2025-06-01&to=2025-06-15&tz=UTC", nil)
+	eq(t, rec.Code, http.StatusOK)
+	eq(t, rec.Header().Get("Cache-Control"), "no-store")
+	checkHeaders(t, rec)
+
+	body := decodeJSON[query.ReportersResponse](t, rec)
+	eq(t, body.Range.From, "2025-06-01")
+	eq(t, len(body.Reporters), 1)
+	eq(t, body.Reporters[0].Org, "Google")
+	eq(t, body.Reporters[0].Reports, int64(1))
+	eq(t, body.Reporters[0].Messages, int64(10))
+	eqSliceServer(t, body.Reporters[0].Domains, []string{"example.com"})
+
+	eq(t, env.do(t, http.MethodGet, "/api/reporters?tz=Local", nil).Code, http.StatusBadRequest)
+}
+
+func eqSliceServer[T comparable](t *testing.T, got, want []T) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+
+	for index := range got {
+		if got[index] != want[index] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
 }
 
 func TestFetchAccepted(t *testing.T) {

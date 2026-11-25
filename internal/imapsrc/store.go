@@ -85,6 +85,12 @@ func uint32From(value int64) (uint32, error) {
 	return uint32(value), nil
 }
 
+// setPending records how many searched UIDs are still to process. It
+// stays NULL until the first UID SEARCH of a mailbox completes.
+func (fetcher *Fetcher) setPending(ctx context.Context, name string, pending int64) error {
+	return fetcher.exec(ctx, `UPDATE mailboxes SET pending = ? WHERE name = ?`, pending, name)
+}
+
 func (fetcher *Fetcher) markStart(ctx context.Context, name string) error {
 	return fetcher.exec(ctx, `UPDATE mailboxes SET last_fetch_start = ? WHERE name = ?`,
 		fetcher.now().Unix(), name)
