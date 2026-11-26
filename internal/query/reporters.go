@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"slices"
 	"strings"
@@ -15,13 +16,8 @@ func quietByRule(firstEnd, lastEnd, fromUnix, threshold int64) bool {
 	return firstEnd < fromUnix && lastEnd < threshold
 }
 
-func (svc *Service) quietThreshold(rng *resolvedRange) int64 {
-	cutoff := rng.toUnix
-	if nowUnix := svc.now().Unix(); nowUnix < cutoff {
-		cutoff = nowUnix
-	}
-
-	return cutoff - quietDays*daySeconds
+func (svc *Service) quietCutoff(rng *resolvedRange) int64 {
+	return min(rng.toUnix, svc.now().Unix())
 }
 
 // Reporters returns every org that ever sent an original aggregate
@@ -54,9 +50,10 @@ func (svc *Service) Reporters(ctx context.Context, filter Filter) (ReportersResp
 }
 
 type reporterHistoryRow struct {
-	Org      string `db:"org"`
-	FirstEnd int64  `db:"first_end"`
-	LastEnd  int64  `db:"last_end"`
+	Org             string        `db:"org"`
+	FirstEnd        int64         `db:"first_end"`
+	LastEnd         int64         `db:"last_end"`
+	LastEndAtCutoff sql.NullInt64 `db:"last_end_at_cutoff"`
 }
 
 type reporterRangeRow struct {
@@ -68,7 +65,9 @@ type reporterRangeRow struct {
 func (svc *Service) loadReporters(
 	ctx context.Context, tx *sqlx.Tx, rng *resolvedRange, domain string,
 ) ([]Reporter, error) {
-	historyQuery := `SELECT org AS org, MIN(end) AS first_end, MAX(end) AS last_end
+	cutoff := svc.quietCutoff(rng)
+	historyQuery := `SELECT org AS org, MIN(end) AS first_end, MAX(end) AS last_end,
+		MAX(CASE WHEN end <= ? THEN end END) AS last_end_at_cutoff
 		FROM reports
 		WHERE duplicate_of IS NULL AND kind = 'dmarc-aggregate'`
 	rangeQuery := `SELECT r.org AS org, COUNT(DISTINCT r.id) AS reports,
@@ -77,7 +76,7 @@ func (svc *Service) loadReporters(
 		LEFT JOIN records rec ON rec.report = r.id
 		WHERE r.duplicate_of IS NULL AND r.kind = 'dmarc-aggregate'
 		AND ((r.begin + r.end) / 2) >= ? AND ((r.begin + r.end) / 2) < ?`
-	historyArgs := []any{}
+	historyArgs := []any{cutoff}
 	rangeArgs := []any{rng.fromUnix, rng.toUnix}
 
 	if domain != "" {
@@ -112,7 +111,7 @@ func (svc *Service) loadReporters(
 		statsByOrg[inRange[index].Org] = inRange[index]
 	}
 
-	threshold := svc.quietThreshold(rng)
+	threshold := cutoff - quietDays*daySeconds
 	reporters := make([]Reporter, 0, len(history))
 
 	for index := range history {
@@ -124,6 +123,8 @@ func (svc *Service) loadReporters(
 		}
 
 		stats := statsByOrg[row.Org]
+		quiet := row.LastEndAtCutoff.Valid &&
+			quietByRule(row.FirstEnd, row.LastEndAtCutoff.Int64, rng.fromUnix, threshold)
 		reporters = append(reporters, Reporter{
 			Org:           row.Org,
 			Domains:       domains,
@@ -131,7 +132,7 @@ func (svc *Service) loadReporters(
 			Messages:      stats.Messages,
 			FirstReportAt: row.FirstEnd,
 			LastReportAt:  row.LastEnd,
-			Quiet:         quietByRule(row.FirstEnd, row.LastEnd, rng.fromUnix, threshold),
+			Quiet:         quiet,
 		})
 	}
 
