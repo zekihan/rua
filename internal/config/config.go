@@ -171,8 +171,12 @@ func loopback(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// onOff accepts on/off for boolean switches such as LOOKUPS.
-func onOff(_ context.Context, _, _, _, resolvedValue string) (string, bool, error) {
+// onOff accepts on/off for LOOKUPS.
+func onOff(_ context.Context, key, _, _, resolvedValue string) (string, bool, error) {
+	if key != "LOOKUPS" {
+		return resolvedValue, false, nil
+	}
+
 	switch strings.ToLower(strings.TrimSpace(resolvedValue)) {
 	case "on":
 		return "true", false, nil

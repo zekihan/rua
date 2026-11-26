@@ -57,6 +57,77 @@ func TestIMAP(t *testing.T) {
 	}
 }
 
+func TestLiteralStrings(t *testing.T) {
+	t.Parallel()
+
+	const (
+		dbPath   = "on"
+		mailbox  = "Off"
+		username = "oN"
+	)
+
+	cases := map[string]map[string]string{
+		"environment": {
+			"DB_PATH": dbPath, "IMAP_MAILBOXES": mailbox, "IMAP_USERNAME": username,
+			"DB_PATH_FILE": "missing",
+		},
+		"files": {
+			"DB_PATH_FILE": dbPath, "IMAP_MAILBOXES_FILE": mailbox, "IMAP_USERNAME_FILE": username,
+		},
+	}
+
+	for name, env := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg, err := load(
+				t.Context(),
+				envconfig.MapLookuper(env),
+				func(path string) ([]byte, error) {
+					if path == "missing" {
+						return noFiles(path)
+					}
+
+					return []byte(path + "\r\n"), nil
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if cfg.DBPath != dbPath || cfg.IMAPUsername != username ||
+				len(cfg.IMAPMailboxes) != 1 || cfg.IMAPMailboxes[0] != mailbox {
+				t.Fatalf("unexpected DB_PATH %q, IMAP_USERNAME %q, IMAP_MAILBOXES %q",
+					cfg.DBPath, cfg.IMAPUsername, cfg.IMAPMailboxes)
+			}
+		})
+	}
+}
+
+func TestLookups(t *testing.T) {
+	t.Parallel()
+
+	for value, want := range map[string]bool{
+		"on": true, "off": false, "true": true, "false": false, " On ": true, " OfF ": false,
+	} {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+
+			for _, key := range []string{"LOOKUPS", "LOOKUPS_FILE"} {
+				cfg, err := load(t.Context(), envconfig.MapLookuper(map[string]string{key: value}),
+					func(path string) ([]byte, error) { return []byte(path + "\r\n"), nil })
+				if err != nil {
+					t.Fatalf("%s: %v", key, err)
+				}
+
+				if cfg.Lookups != want {
+					t.Errorf("%s: got %t, want %t", key, cfg.Lookups, want)
+				}
+			}
+		})
+	}
+}
+
 func TestInvalid(t *testing.T) {
 	t.Parallel()
 
