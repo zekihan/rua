@@ -12,6 +12,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/emersion/go-message/charset"
+
 	"github.com/zekihan/rua/internal/parse/text"
 	"github.com/zekihan/rua/internal/report"
 )
@@ -117,9 +119,37 @@ func (limits *xmlLimits) start(name xml.Name) error {
 	return nil
 }
 
+func aggregateDecoder(data []byte) *xml.Decoder {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	decoder.CharsetReader = charset.Reader
+
+	return decoder
+}
+
+// declaresNonUTF8 uses the XML decoder's declaration handling to tell
+// whether the report bytes require conversion before they can be read as UTF-8.
+func declaresNonUTF8(data []byte) bool {
+	data = bytes.TrimLeft(data, " \t\r\n")
+	if !bytes.HasPrefix(data, []byte("<?xml")) {
+		return false
+	}
+
+	var declared bool
+
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	decoder.CharsetReader = func(_ string, input io.Reader) (io.Reader, error) {
+		declared = true
+
+		return input, nil
+	}
+	_, err := decoder.RawToken()
+
+	return err == nil && declared
+}
+
 // checkXML bounds nesting and record count before unmarshalling.
 func checkXML(data []byte) error {
-	decoder := xml.NewDecoder(bytes.NewReader(data))
+	decoder := aggregateDecoder(data)
 
 	var limits xmlLimits
 
@@ -153,12 +183,12 @@ func checkXML(data []byte) error {
 
 // ParseAggregate parses one decompressed aggregate report XML document.
 func ParseAggregate(data []byte) (*report.Aggregate, error) {
+	data = bytes.TrimPrefix(data, []byte("\uFEFF"))
+
 	// The XML decoder rejects invalid UTF-8 before field values can be sanitized.
-	if !utf8.Valid(data) {
+	if !utf8.Valid(data) && !declaresNonUTF8(data) {
 		data = []byte(strings.ToValidUTF8(string(data), "�"))
 	}
-
-	data = bytes.TrimPrefix(data, []byte("\uFEFF"))
 
 	err := checkXML(data)
 	if err != nil {
@@ -167,7 +197,7 @@ func ParseAggregate(data []byte) (*report.Aggregate, error) {
 
 	var doc document
 
-	err = xml.Unmarshal(data, &doc)
+	err = aggregateDecoder(data).Decode(&doc)
 	if err != nil {
 		return nil, fmt.Errorf("decode aggregate: %w", err)
 	}

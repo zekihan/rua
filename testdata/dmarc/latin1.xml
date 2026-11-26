@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<feedback>
+  <report_metadata>
+    <org_name>Café</org_name>
+    <email>reports@example.net</email>
+    <report_id>latin1-1</report_id>
+    <date_range><begin>1704067200</begin><end>1704153599</end></date_range>
+  </report_metadata>
+  <policy_published><domain>example.com</domain><p>reject</p><pct>100</pct></policy_published>
+  <record>
+    <row>
+      <source_ip>192.0.2.10</source_ip><count>3</count>
+      <policy_evaluated><disposition>none</disposition><dkim>pass</dkim><spf>fail</spf></policy_evaluated>
+    </row>
+    <identifiers><header_from>example.com</header_from></identifiers>
+    <auth_results>
+      <dkim><domain>example.com</domain><selector>mail</selector><result>pass</result></dkim>
+    </auth_results>
+  </record>
+</feedback>

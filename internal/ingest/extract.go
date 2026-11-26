@@ -475,7 +475,16 @@ func documentClass(data []byte, hint report.Class) report.Class {
 func feedbackRoot(data []byte) bool {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 
-	decoder.CharsetReader = charset.Reader
+	decoder.CharsetReader = func(label string, input io.Reader) (io.Reader, error) {
+		decoded, err := charset.Reader(label, input)
+		if err != nil {
+			// An ASCII feedback tag can still identify the report.
+			// The parser will record the charset error for this document.
+			return input, nil //nolint:nilerr // Sniff the root without charset conversion.
+		}
+
+		return decoded, nil
+	}
 	for {
 		token, err := decoder.Token()
 		if err != nil {

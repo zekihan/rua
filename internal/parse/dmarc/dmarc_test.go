@@ -12,7 +12,14 @@ import (
 	"github.com/zekihan/rua/internal/report"
 )
 
-var aggregates = []string{"google.xml", "outlook.xml", "yahoo.xml", "quirks.xml", "dmarc-2.0.xml"}
+var aggregates = []string{
+	"google.xml",
+	"outlook.xml",
+	"yahoo.xml",
+	"quirks.xml",
+	"dmarc-2.0.xml",
+	"latin1.xml",
+}
 
 func fixture(tb testing.TB, group, name string) []byte {
 	tb.Helper()
@@ -83,6 +90,17 @@ func TestAggregateFixtures(t *testing.T) {
 			"example.org",
 			"reject",
 			-1,
+			1,
+			1704153599,
+		},
+		{
+			"latin1.xml",
+			"rfc7489",
+			"Café",
+			"latin1-1",
+			"example.com",
+			"reject",
+			100,
 			1,
 			1704153599,
 		},

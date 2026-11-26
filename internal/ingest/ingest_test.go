@@ -1422,7 +1422,7 @@ func TestReparseIfNeededFromVersion2(t *testing.T) {
 	assertEqual(
 		t,
 		scalar[string](t, st, "SELECT value FROM meta WHERE key=?", store.MetaParserVersion),
-		"4",
+		strconv.Itoa(report.ParserVersion),
 	)
 	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM reports"), 1)
 	assertEqual(t, scalar[int](t, st, "SELECT count(*) FROM records"), 1)
