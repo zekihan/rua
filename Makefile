@@ -48,7 +48,11 @@ run: build
 tidy:
 	$(GO) fmt ./...
 	$(GO) mod tidy -v
-	@test -d web/node_modules && npm --prefix web run typecheck || echo "skip: web typecheck (run 'make web' first)"
+	@if [ -d web/node_modules ]; then \
+		npm --prefix web run typecheck; \
+	else \
+		echo "skip: web typecheck (run 'make web' first)"; \
+	fi
 
 lint: tidy
 	golangci-lint fmt
