@@ -55,6 +55,7 @@ tidy:
 	fi
 
 lint: tidy
+	node .github/scripts/check_web_install_scripts.mjs
 	golangci-lint fmt
 	golangci-lint run --fix > /dev/null 2>&1 || true
 	golangci-lint run
