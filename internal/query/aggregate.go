@@ -776,11 +776,12 @@ func sortNewSources(rows []NewSource) {
 func (svc *Service) quietReporters(
 	ctx context.Context, tx *sqlx.Tx, rng *resolvedRange, domain string,
 ) ([]QuietReporter, error) {
-	threshold := svc.quietThreshold(rng)
+	cutoff := svc.quietCutoff(rng)
+	threshold := cutoff - quietDays*daySeconds
 
 	query := `SELECT org AS org, MIN(end) AS first_end, MAX(end) AS last_end FROM reports
-		WHERE duplicate_of IS NULL AND kind = 'dmarc-aggregate'`
-	args := []any{}
+		WHERE duplicate_of IS NULL AND kind = 'dmarc-aggregate' AND end <= ?`
+	args := []any{cutoff}
 
 	if domain != "" {
 		query += domainClause

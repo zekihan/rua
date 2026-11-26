@@ -1035,6 +1035,131 @@ func TestQuietAndLongWindow(t *testing.T) {
 	eq(t, overview.QuietReporters[0].Org, "OldReporter")
 }
 
+func TestHistoricalQuiet(t *testing.T) {
+	t.Parallel()
+
+	fx := newFixture(t, sources.Empty())
+
+	const may = "from=2025-05-01&to=2025-05-31&tz=UTC"
+
+	aprilEnd := unixTime(2025, time.April, 11, 0)
+	juneEnd := unixTime(2025, time.June, 10, 0)
+
+	fx.ingest(t, aggregateXML("Reporter", "historical-april", "example.com",
+		unixTime(2025, time.April, 10, 0), aprilEnd, "reject", 100,
+		"192.0.2.1", 2, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+
+	assertMay := func(t *testing.T, lastReportAt int64, reporterCount int) []Reporter {
+		t.Helper()
+
+		quiet := overviewFor(t, fx, may).QuietReporters
+		if len(quiet) != 1 {
+			t.Fatalf("May quiet reporters = %v, want exactly one", quiet)
+		}
+
+		eq(t, quiet[0].Org, "Reporter")
+		eq(t, quiet[0].LastReportAt, aprilEnd)
+
+		response, err := fx.svc.Reporters(t.Context(), fx.filter(t, may))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		eq(t, len(response.Reporters), reporterCount)
+		reporter := response.Reporters[0]
+		eq(t, reporter.Org, "Reporter")
+		eq(t, reporter.Quiet, true)
+		eq(t, reporter.FirstReportAt, aprilEnd)
+		eq(t, reporter.LastReportAt, lastReportAt)
+
+		return response.Reporters
+	}
+
+	assertMay(t, aprilEnd, 1)
+
+	fx.ingest(t, aggregateXML("Reporter", "historical-june", "example.com",
+		unixTime(2025, time.June, 9, 0), juneEnd, "reject", 100,
+		"192.0.2.1", 2, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+	fx.ingest(t, aggregateXML("JuneOnly", "historical-june-only", "example.net",
+		unixTime(2025, time.June, 9, 0), juneEnd, "reject", 100,
+		"192.0.2.1", 2, "pass", "fail", "none", "example.net", "example.net", "pass", "s1", ""))
+
+	reporters := assertMay(t, juneEnd, 2)
+	eq(t, reporters[1].Org, "JuneOnly")
+	eq(t, reporters[1].Quiet, false)
+
+	t.Run("June range", func(t *testing.T) {
+		t.Parallel()
+
+		const june = "domain=example.com&from=2025-06-01&to=2025-06-30&tz=UTC"
+		eq(t, len(overviewFor(t, fx, june).QuietReporters), 0)
+
+		response, err := fx.svc.Reporters(t.Context(), fx.filter(t, june))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		eq(t, len(response.Reporters), 1)
+		eq(t, response.Reporters[0].Org, "Reporter")
+		eq(t, response.Reporters[0].Reports, int64(1))
+		eq(t, response.Reporters[0].Quiet, false)
+	})
+
+	t.Run("domain with only later history", func(t *testing.T) {
+		t.Parallel()
+
+		const filteredMay = "domain=example.net&" + may
+		eq(t, len(overviewFor(t, fx, filteredMay).QuietReporters), 0)
+
+		response, err := fx.svc.Reporters(t.Context(), fx.filter(t, filteredMay))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		eq(t, len(response.Reporters), 1)
+		eq(t, response.Reporters[0].Org, "JuneOnly")
+		eq(t, response.Reporters[0].Quiet, false)
+	})
+
+	t.Run("future range capped at now", func(t *testing.T) {
+		t.Parallel()
+
+		fx := newFixture(t, sources.Empty())
+		fx.ingest(t, aggregateXML("Reporter", "capped-april", "example.net",
+			unixTime(2025, time.April, 10, 0), aprilEnd, "reject", 100,
+			"192.0.2.1", 2, "pass", "fail", "none", "example.net", "example.net", "pass", "s1", ""))
+		futureEnd := unixTime(2025, time.June, 20, 0)
+		fx.ingest(t, aggregateXML("Reporter", "capped-future", "example.net",
+			unixTime(2025, time.June, 19, 0), futureEnd, "reject", 100,
+			"192.0.2.1", 2, "pass", "fail", "none", "example.net", "example.net", "pass", "s1", ""))
+		fx.ingest(t, aggregateXML("Reporter", "other-domain-june", "example.com",
+			unixTime(2025, time.June, 9, 0), juneEnd, "reject", 100,
+			"192.0.2.1", 2, "pass", "fail", "none", "example.com", "example.com", "pass", "s1", ""))
+
+		const (
+			june         = "from=2025-06-01&to=2025-06-30&tz=UTC"
+			filteredJune = "domain=example.net&" + june
+		)
+
+		eq(t, len(overviewFor(t, fx, june).QuietReporters), 0)
+		quiet := overviewFor(t, fx, filteredJune).QuietReporters
+		eq(t, len(quiet), 1)
+		eq(t, quiet[0].Org, "Reporter")
+		eqSlice(t, quiet[0].Domains, []string{"example.net"})
+		eq(t, quiet[0].LastReportAt, aprilEnd)
+
+		response, err := fx.svc.Reporters(t.Context(), fx.filter(t, filteredJune))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		eq(t, len(response.Reporters), 1)
+		eq(t, response.Reporters[0].Org, "Reporter")
+		eq(t, response.Reporters[0].Quiet, true)
+		eq(t, response.Reporters[0].LastReportAt, futureEnd)
+	})
+}
+
 func statusFor(t *testing.T, fx *fixture) Status {
 	t.Helper()
 
